@@ -161,7 +161,8 @@
   <div id="wagonInfo">Select a planting to start a wagon.</div>
 
   <h3>2. Scan Racks</h3>
-  <input type="text" id="rackInput" placeholder="Scan or type rack number, then Enter" disabled>
+  <input type="text" id="rackInput" inputmode="none" placeholder="Scan or type rack number, then Enter" disabled>
+  <button id="manualEntryBtn" type="button" style="background:#e2e0d6; color:var(--green-dark); margin-top:-4px;">Manual Entry (show keyboard)</button>
 
   <h3>3. Total Bags on This Wagon</h3>
   <input type="number" id="bagInput" placeholder="Enter total bags" disabled>
@@ -183,6 +184,20 @@
   const plantingSelect = document.getElementById('plantingSelect');
   const wagonInfo = document.getElementById('wagonInfo');
   const rackInput = document.getElementById('rackInput');
+  const manualEntryBtn = document.getElementById('manualEntryBtn');
+
+  manualEntryBtn.addEventListener('click', () => {
+    const isManual = rackInput.getAttribute('inputmode') === 'text';
+    if (isManual) {
+      rackInput.setAttribute('inputmode', 'none');
+      manualEntryBtn.textContent = 'Manual Entry (show keyboard)';
+    } else {
+      rackInput.setAttribute('inputmode', 'text');
+      manualEntryBtn.textContent = 'Scanner Mode (hide keyboard)';
+    }
+    rackInput.blur();
+    rackInput.focus();
+  });
   const bagInput = document.getElementById('bagInput');
   const rackCountEl = document.getElementById('rackCount');
   const rackLogEl = document.getElementById('rackLog');
@@ -305,12 +320,20 @@
     });
   }
 
+  function toDatetimeLocalValue(isoString) {
+    const d = new Date(isoString);
+    const pad = n => String(n).padStart(2, '0');
+    return `${d.getFullYear()}-${pad(d.getMonth()+1)}-${pad(d.getDate())}T${pad(d.getHours())}:${pad(d.getMinutes())}`;
+  }
+
   async function openWagonEditor(wagon, row) {
     row.onclick = null; // stop row-level clicks from reopening/resetting the editor
 
     row.innerHTML = `
       <div style="margin-bottom:8px;"><strong>${wagon.planting_id} — Wagon #${wagon.wagon_number}</strong></div>
       <input type="number" class="editBagInput" value="${wagon.total_bags}" style="margin-bottom:8px;">
+      <label style="font-size:13px; color:#888;">Time logged</label>
+      <input type="datetime-local" class="editTimeInput" value="${toDatetimeLocalValue(wagon.created_at)}" style="margin-bottom:8px;">
       <div style="display:flex; gap:8px; margin-bottom:12px;">
         <button class="saveEditBtn" style="background:#27ae60; color:white; flex:1;">Save</button>
         <button class="deleteEditBtn" style="background:#e74c3c; color:white; flex:1;">Delete</button>
@@ -375,7 +398,10 @@
       e.stopPropagation();
       const newBags = parseInt(row.querySelector('.editBagInput').value);
       if (!newBags || newBags <= 0) return;
-      await db.from('Wagons').update({ total_bags: newBags }).eq('id', wagon.id);
+      const newTimeLocal = row.querySelector('.editTimeInput').value; // e.g. "2026-07-21T14:30"
+      if (!newTimeLocal) return;
+      const newTimeISO = new Date(newTimeLocal).toISOString();
+      await db.from('Wagons').update({ total_bags: newBags, created_at: newTimeISO }).eq('id', wagon.id);
       loadRecentWagons();
       refreshTodayTotals();
       refreshSeasonTotals();
