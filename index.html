@@ -1,0 +1,158 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>Wagon Counter</title>
+<style>
+  body {
+    font-family: Arial, sans-serif;
+    max-width: 480px;
+    margin: 40px auto;
+    background: #f4f4f4;
+    text-align: center;
+  }
+  h1 { color: #333; }
+  #todayCount {
+    font-size: 64px;
+    font-weight: bold;
+    margin: 10px 0;
+    color: #2c3e50;
+  }
+  #todayBags {
+    font-size: 18px;
+    color: #555;
+    margin-bottom: 20px;
+  }
+  #allCount {
+    font-size: 14px;
+    color: #777;
+    margin-bottom: 20px;
+  }
+  #bagInput {
+    font-size: 20px;
+    padding: 10px;
+    width: 100px;
+    text-align: center;
+    margin-bottom: 12px;
+  }
+  #wagonBtn {
+    font-size: 22px;
+    padding: 20px 40px;
+    background: #27ae60;
+    color: white;
+    border: none;
+    border-radius: 8px;
+    cursor: pointer;
+  }
+  #resetBtn {
+    margin-top: 20px;
+    padding: 8px 16px;
+    background: #e74c3c;
+    color: white;
+    border: none;
+    border-radius: 4px;
+    cursor: pointer;
+  }
+  ul {
+    list-style: none;
+    padding: 0;
+    text-align: left;
+    max-height: 300px;
+    overflow-y: auto;
+    margin-top: 20px;
+  }
+  li {
+    background: white;
+    padding: 8px 12px;
+    margin-bottom: 6px;
+    border-radius: 4px;
+  }
+</style>
+</head>
+<body>
+
+<h1>Wagon Counter</h1>
+
+<h3>Today</h3>
+<div id="todayCount">0</div>
+<div id="todayBags">0 bags</div>
+
+<div>
+  <input type="number" id="bagInput" placeholder="Bags" min="0">
+</div>
+<button id="wagonBtn">+ Wagon</button>
+<br>
+<button id="resetBtn">Reset All Data</button>
+
+<h3>All-Time Total</h3>
+<div id="allCount">0 wagons — 0 bags</div>
+
+<ul id="log"></ul>
+
+<script>
+  const todayCountEl = document.getElementById('todayCount');
+  const todayBagsEl = document.getElementById('todayBags');
+  const allCountEl = document.getElementById('allCount');
+  const bagInput = document.getElementById('bagInput');
+  const logEl = document.getElementById('log');
+  const wagonBtn = document.getElementById('wagonBtn');
+  const resetBtn = document.getElementById('resetBtn');
+
+  // each entry is {dateKey, timestamp, bags}
+  // dateKey = 'YYYY-MM-DD' used for filtering "today"; timestamp = display string
+  let wagons = JSON.parse(localStorage.getItem('wagons') || '[]');
+
+  function todayKey() {
+    const d = new Date();
+    return d.getFullYear() + '-' + (d.getMonth() + 1) + '-' + d.getDate();
+  }
+
+  function render() {
+    const key = todayKey();
+    const todayWagons = wagons.filter(w => w.dateKey === key);
+    const todayBags = todayWagons.reduce((sum, w) => sum + w.bags, 0);
+    const allBags = wagons.reduce((sum, w) => sum + w.bags, 0);
+
+    todayCountEl.textContent = todayWagons.length;
+    todayBagsEl.textContent = `${todayBags} bags`;
+    allCountEl.textContent = `${wagons.length} wagons — ${allBags} bags`;
+
+    logEl.innerHTML = '';
+    // show newest first
+    wagons.slice().reverse().forEach((entry, i) => {
+      const li = document.createElement('li');
+      const wagonNum = wagons.length - i;
+      li.textContent = `Wagon #${wagonNum} — ${entry.bags} bags — ${entry.timestamp}`;
+      logEl.appendChild(li);
+    });
+  }
+
+  function addWagon() {
+    const bags = parseInt(bagInput.value) || 0;
+    const now = new Date();
+    wagons.push({
+      dateKey: todayKey(),
+      timestamp: now.toLocaleString(),
+      bags: bags
+    });
+    localStorage.setItem('wagons', JSON.stringify(wagons));
+    bagInput.value = '';
+    render();
+  }
+
+  function reset() {
+    if (confirm('Reset all data? This clears everything, including past days.')) {
+      wagons = [];
+      localStorage.setItem('wagons', JSON.stringify(wagons));
+      render();
+    }
+  }
+
+  wagonBtn.addEventListener('click', addWagon);
+  resetBtn.addEventListener('click', reset);
+
+  render();
+</script>
+
+</body>
+</html>
