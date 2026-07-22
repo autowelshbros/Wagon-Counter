@@ -2,6 +2,7 @@
 <html lang="en">
 <head>
 <meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Wagon Tracker</title>
 <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
 <style>
@@ -193,16 +194,19 @@
   const manualEntryBtn = document.getElementById('manualEntryBtn');
 
   manualEntryBtn.addEventListener('click', () => {
-    const isManual = rackInput.getAttribute('inputmode') === 'text';
+    const isManual = rackInput.getAttribute('inputmode') !== 'none';
     if (isManual) {
+      // Currently manual (keyboard-enabled) — switch to scanner mode (suppress keyboard)
       rackInput.setAttribute('inputmode', 'none');
       manualEntryBtn.textContent = 'Manual Entry (show keyboard)';
     } else {
-      rackInput.setAttribute('inputmode', 'text');
+      // Currently scanner mode — switch to manual (removing the attribute entirely
+      // is more reliable than setting inputmode="text" for restoring the keyboard on iOS Safari)
+      rackInput.removeAttribute('inputmode');
       manualEntryBtn.textContent = 'Scanner Mode (hide keyboard)';
     }
     rackInput.blur();
-    rackInput.focus();
+    setTimeout(() => rackInput.focus(), 50);
   });
   const bagInput = document.getElementById('bagInput');
   const rackCountEl = document.getElementById('rackCount');
