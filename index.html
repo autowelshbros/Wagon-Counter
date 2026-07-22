@@ -31,7 +31,7 @@
   h1 {
     text-align: center;
     color: var(--green-dark);
-    font-size: 22px;
+    font-size: 26px;
     letter-spacing: 0.5px;
     margin: 4px 0 20px;
   }
@@ -39,14 +39,14 @@
     margin-top: 28px;
     margin-bottom: 10px;
     color: var(--green-dark);
-    font-size: 15px;
+    font-size: 18px;
     text-transform: uppercase;
     letter-spacing: 0.5px;
   }
   select, input {
     width: 100%;
-    padding: 12px;
-    font-size: 17px;
+    padding: 14px;
+    font-size: 20px;
     margin-bottom: 12px;
     box-sizing: border-box;
     border: 1px solid #ccc;
@@ -67,14 +67,14 @@
     padding: 12px 14px;
     border-radius: 10px;
     margin-bottom: 16px;
-    font-size: 15px;
+    font-size: 18px;
     color: #444;
     box-shadow: 0 1px 4px rgba(0,0,0,0.08);
   }
   button {
     width: 100%;
-    padding: 14px;
-    font-size: 16px;
+    padding: 16px;
+    font-size: 19px;
     font-weight: 600;
     border: none;
     border-radius: 8px;
@@ -84,14 +84,14 @@
   }
   button:active { opacity: 0.85; }
   #finishBtn { background: var(--green); color: white; }
-  #status { text-align: center; color: #888; font-size: 14px; min-height: 20px; }
+  #status { text-align: center; color: #888; font-size: 16px; min-height: 20px; }
   ul { list-style: none; padding: 0; max-height: 200px; overflow-y: auto; }
   li {
     background: white;
-    padding: 10px 14px;
+    padding: 12px 14px;
     margin-bottom: 6px;
     border-radius: 8px;
-    font-size: 14px;
+    font-size: 17px;
     box-shadow: 0 1px 3px rgba(0,0,0,0.06);
   }
   .tabBtn {
@@ -99,8 +99,8 @@
     color: var(--green-dark);
     width: auto;
     flex: 1;
-    font-size: 15px;
-    padding: 12px 8px;
+    font-size: 17px;
+    padding: 14px 8px;
   }
   .tabActive {
     background: var(--green);
@@ -118,18 +118,24 @@
 
 <div style="display:flex; gap:8px; margin-bottom:16px;">
   <button id="tabEntryBtn" class="tabBtn tabActive">Entry</button>
+  <button id="tabConfirmBtn" class="tabBtn">Confirm</button>
   <button id="tabTotalsBtn" class="tabBtn">Totals</button>
   <button id="tabRecordsBtn" class="tabBtn">Records</button>
 </div>
 
+<div id="tabConfirm" style="display:none;">
+  <h3>Wagons Awaiting Confirmation</h3>
+  <div id="unconfirmedList"></div>
+</div>
+
 <div id="tabTotals" style="display:none;">
   <div id="seasonTotals" style="background:white; padding:14px; border-radius:6px; margin-bottom:16px; text-align:center; border:2px solid #2c3e50;">
-    <div style="font-size:14px; color:#888;">SEASON TOTAL</div>
+    <div style="font-size:16px; color:#888;">SEASON TOTAL</div>
     <div style="font-size:32px; font-weight:bold; color:#2c3e50;"><span id="seasonWagons">0</span> wagons — <span id="seasonBags">0</span> bags</div>
   </div>
 
   <div id="todayTotals" style="background:white; padding:14px; border-radius:6px; margin-bottom:16px; text-align:center;">
-    <div style="font-size:14px; color:#888;">TODAY</div>
+    <div style="font-size:16px; color:#888;">TODAY</div>
     <div style="font-size:32px; font-weight:bold; color:#2c3e50;"><span id="todayWagons">0</span> wagons — <span id="todayBags">0</span> bags</div>
   </div>
 
@@ -146,7 +152,7 @@
   <h3>Search: Find a Rack</h3>
   <input type="text" id="searchInput" placeholder="Enter rack number">
   <button id="searchBtn" style="background:#2c3e50; color:white;">Search</button>
-  <div id="searchResult" style="background:white; padding:12px; border-radius:6px; margin-bottom:16px; font-size:15px; color:#444; min-height:20px;"></div>
+  <div id="searchResult" style="background:white; padding:12px; border-radius:6px; margin-bottom:16px; font-size:17px; color:#444; min-height:20px;"></div>
 
   <h3>Recent Wagons (tap to edit)</h3>
   <div id="recentWagons"></div>
@@ -287,6 +293,44 @@
     }).join('');
   }
 
+  // Load wagons awaiting confirmation
+  async function loadUnconfirmedWagons() {
+    const { data, error } = await db
+      .from('Wagons')
+      .select('*')
+      .eq('confirmed', false)
+      .order('created_at', { ascending: true });
+
+    const container = document.getElementById('unconfirmedList');
+    if (error) {
+      container.textContent = 'Error loading: ' + error.message;
+      return;
+    }
+    if (!data || data.length === 0) {
+      container.innerHTML = '<div style="color:#888; text-align:center;">Nothing waiting on confirmation.</div>';
+      return;
+    }
+
+    container.innerHTML = '';
+    data.forEach(w => {
+      const when = new Date(w.created_at).toLocaleString();
+      const card = document.createElement('div');
+      card.className = 'card';
+      card.style.cssText = 'padding:14px; margin-bottom:12px;';
+      card.innerHTML = `
+        <div style="font-weight:bold; margin-bottom:4px;">${w.planting_id} — Wagon #${w.wagon_number}</div>
+        <div style="font-size:15px; color:#888; margin-bottom:8px;">${when}</div>
+        <div style="font-size:28px; font-weight:bold; color:var(--green-dark); margin-bottom:10px;">${w.total_bags} bags</div>
+        <button class="confirmBtn" style="background:var(--green); color:white;">Confirm Count</button>
+      `;
+      card.querySelector('.confirmBtn').addEventListener('click', async () => {
+        await db.from('Wagons').update({ confirmed: true }).eq('id', w.id);
+        loadUnconfirmedWagons();
+      });
+      container.appendChild(card);
+    });
+  }
+
   // Load recent wagons for editing
   async function loadRecentWagons() {
     const { data, error } = await db
@@ -313,7 +357,7 @@
       row.innerHTML = `<div style="display:flex; justify-content:space-between;">
         <span>${w.planting_id} — Wagon #${w.wagon_number}</span><span>${w.total_bags} bags</span>
       </div>
-      <div style="font-size:12px; color:#888;">${when}</div>`;
+      <div style="font-size:14px; color:#888;">${when}</div>`;
 
       row.onclick = () => openWagonEditor(w, row);
       container.appendChild(row);
@@ -332,7 +376,7 @@
     row.innerHTML = `
       <div style="margin-bottom:8px;"><strong>${wagon.planting_id} — Wagon #${wagon.wagon_number}</strong></div>
       <input type="number" class="editBagInput" value="${wagon.total_bags}" style="margin-bottom:8px;">
-      <label style="font-size:13px; color:#888;">Time logged</label>
+      <label style="font-size:15px; color:#888;">Time logged</label>
       <input type="datetime-local" class="editTimeInput" value="${toDatetimeLocalValue(wagon.created_at)}" style="margin-bottom:8px;">
       <div style="display:flex; gap:8px; margin-bottom:12px;">
         <button class="saveEditBtn" style="background:#27ae60; color:white; flex:1;">Save</button>
@@ -365,7 +409,7 @@
       area.innerHTML = racks.map(r => `
         <div style="display:flex; justify-content:space-between; align-items:center; background:#f4f4f4; padding:6px 10px; border-radius:4px; margin-bottom:4px;">
           <span>${r.rack_number}</span>
-          <button class="removeRackBtn" data-id="${r.id}" style="background:#e74c3c; color:white; width:auto; padding:4px 10px; font-size:13px;">Remove</button>
+          <button class="removeRackBtn" data-id="${r.id}" style="background:#e74c3c; color:white; width:auto; padding:4px 10px; font-size:15px;">Remove</button>
         </div>
       `).join('');
 
@@ -539,19 +583,31 @@
       statusEl.textContent = 'Enter the total bags for this wagon before finishing.';
       return;
     }
+    if (bagTotal > 2000) {
+      statusEl.textContent = `That bag count (${bagTotal}) looks too high — a scan may have landed in this field by mistake. Please re-check and re-enter it.`;
+      return;
+    }
 
     finishBtn.disabled = true;
     statusEl.textContent = 'Saving...';
 
-    // Insert wagon row
-    const { data: wagonData, error: wagonError } = await db
-      .from('Wagons')
-      .insert([{
-        planting_id: currentPlanting,
-        wagon_number: currentWagonNumber,
-        total_bags: bagTotal
-      }])
-      .select();
+    let wagonData, wagonError;
+    try {
+      const result = await db
+        .from('Wagons')
+        .insert([{
+          planting_id: currentPlanting,
+          wagon_number: currentWagonNumber,
+          total_bags: bagTotal
+        }])
+        .select();
+      wagonData = result.data;
+      wagonError = result.error;
+    } catch (networkErr) {
+      statusEl.textContent = 'No connection right now — your racks and bag count are still on screen. Tap "Finish Wagon" again once you have signal.';
+      finishBtn.disabled = false;
+      return;
+    }
 
     if (wagonError) {
       statusEl.textContent = 'Error saving wagon: ' + wagonError.message;
@@ -563,7 +619,15 @@
 
     // Insert rack rows
     const rackRows = currentRacks.map(r => ({ wagon_id: wagonId, rack_number: r }));
-    const { error: rackError } = await db.from('Racks').insert(rackRows);
+    let rackError;
+    try {
+      const rackResult = await db.from('Racks').insert(rackRows);
+      rackError = rackResult.error;
+    } catch (networkErr) {
+      statusEl.textContent = `Wagon #${currentWagonNumber} was saved, but the connection dropped before racks saved. Go to Records and add these racks manually to wagon #${currentWagonNumber}: ${currentRacks.join(', ')}`;
+      finishBtn.disabled = false;
+      return;
+    }
 
     if (rackError) {
       statusEl.textContent = 'Wagon saved, but error saving racks: ' + rackError.message;
@@ -641,6 +705,7 @@
   // Tab switching
   const tabs = {
     entry: { btn: document.getElementById('tabEntryBtn'), panel: document.getElementById('tabEntry') },
+    confirm: { btn: document.getElementById('tabConfirmBtn'), panel: document.getElementById('tabConfirm') },
     totals: { btn: document.getElementById('tabTotalsBtn'), panel: document.getElementById('tabTotals') },
     records: { btn: document.getElementById('tabRecordsBtn'), panel: document.getElementById('tabRecords') }
   };
@@ -651,6 +716,9 @@
       tabs[key].panel.style.display = isActive ? '' : 'none';
       tabs[key].btn.classList.toggle('tabActive', isActive);
     });
+    if (name === 'confirm') {
+      loadUnconfirmedWagons();
+    }
     if (name === 'totals') {
       refreshTodayTotals();
       refreshSeasonTotals();
@@ -661,6 +729,7 @@
   }
 
   tabs.entry.btn.addEventListener('click', () => showTab('entry'));
+  tabs.confirm.btn.addEventListener('click', () => showTab('confirm'));
   tabs.totals.btn.addEventListener('click', () => showTab('totals'));
   tabs.records.btn.addEventListener('click', () => showTab('records'));
 </script>
