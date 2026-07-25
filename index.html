@@ -119,7 +119,7 @@
 </header>
 
 <div style="display:flex; align-items:center; justify-content:center; gap:10px; margin-bottom:8px; flex-wrap:wrap;">
-  <span style="font-size:12px; color:#999;">Build: 2026-07-25 v10</span>
+  <span style="font-size:12px; color:#999;">Build: 2026-07-25 v11</span>
   <button id="checkUpdatesBtn" type="button" style="width:auto; margin:0; padding:6px 12px; font-size:12px; font-weight:600; background:#e2e0d6; color:var(--green-dark); border-radius:6px;">&#8635; Check for updates</button>
 </div>
 
@@ -206,6 +206,7 @@
   </div>
 
   <button id="finishBtn" disabled>Finish Wagon</button>
+  <button id="cancelWagonBtn" disabled style="background:#e74c3c; color:white;">Cancel Wagon</button>
   <div id="status"></div>
 </div>
 
@@ -260,6 +261,7 @@
   const rackCountEl = document.getElementById('rackCount');
   const rackLogEl = document.getElementById('rackLog');
   const finishBtn = document.getElementById('finishBtn');
+  const cancelWagonBtn = document.getElementById('cancelWagonBtn');
   const modeRackBtn = document.getElementById('modeRackBtn');
   const modeBinBtn = document.getElementById('modeBinBtn');
   const rackWagonSection = document.getElementById('rackWagonSection');
@@ -441,6 +443,7 @@
     binCountInput.disabled = !(hasPlanting && currentMode === 'bin');
     wagonNameInput.disabled = !hasPlanting;
     finishBtn.disabled = !hasPlanting;
+    cancelWagonBtn.disabled = !hasPlanting;
   }
 
   function setMode(mode) {
@@ -1020,6 +1023,22 @@
     // Reset for next wagon on the SAME planting
     await resetRackEntryForNextWagon();
     finishBtn.disabled = false;
+  });
+
+  cancelWagonBtn.addEventListener('click', async () => {
+    if (!currentPlanting) return;
+
+    const confirmed = confirm('Are you sure? This will clear all racks and data entered for this wagon.');
+    if (!confirmed) return;
+
+    cancelWagonBtn.disabled = true;
+    if (currentMode === 'bin') {
+      await resetBinEntryForNextWagon();
+    } else {
+      await resetRackEntryForNextWagon();
+    }
+    statusEl.textContent = 'Wagon cleared — nothing was saved.';
+    cancelWagonBtn.disabled = false;
   });
 
   async function searchRack() {
