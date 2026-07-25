@@ -110,6 +110,37 @@
     background: var(--green);
     color: white;
   }
+  #plantingDropdown {
+    display: none;
+    position: absolute;
+    left: 0;
+    right: 0;
+    top: 100%;
+    z-index: 20;
+    background: white;
+    border: 1px solid #ccc;
+    border-radius: 8px;
+    max-height: 280px;
+    overflow-y: auto;
+    box-shadow: 0 4px 10px rgba(0,0,0,0.18);
+    margin-top: -6px;
+  }
+  .plantingOption {
+    padding: 12px 14px;
+    font-size: 16px;
+    border-bottom: 1px solid #eee;
+    cursor: pointer;
+  }
+  .plantingOption:last-child { border-bottom: none; }
+  .plantingOption:active {
+    background: var(--gold);
+  }
+  .plantingNoMatch {
+    padding: 12px 14px;
+    color: #888;
+    text-align: center;
+    font-size: 15px;
+  }
 </style>
 </head>
 <body>
@@ -119,7 +150,7 @@
 </header>
 
 <div style="display:flex; align-items:center; justify-content:center; gap:10px; margin-bottom:8px; flex-wrap:wrap;">
-  <span style="font-size:12px; color:#999;">Build: 2026-07-25 v11</span>
+  <span style="font-size:12px; color:#999;">Build: 2026-07-25 v12</span>
   <button id="checkUpdatesBtn" type="button" style="width:auto; margin:0; padding:6px 12px; font-size:12px; font-weight:600; background:#e2e0d6; color:var(--green-dark); border-radius:6px;">&#8635; Check for updates</button>
 </div>
 
@@ -178,9 +209,10 @@
   </div>
 
   <h3>1. Select Planting</h3>
-  <select id="plantingSelect">
-    <option value="">Loading plantings...</option>
-  </select>
+  <div id="plantingSearchWrap" style="position:relative; margin-bottom:12px;">
+    <input type="text" id="plantingSearchInput" placeholder="Loading plantings..." autocomplete="off" disabled>
+    <div id="plantingDropdown"></div>
+  </div>
 
   <div id="wagonInfo">Select a planting to start a wagon.</div>
 
@@ -236,7 +268,10 @@
 
   document.getElementById('checkUpdatesBtn').addEventListener('click', forceReloadBypassCache);
 
-  const plantingSelect = document.getElementById('plantingSelect');
+  const plantingSearchWrap = document.getElementById('plantingSearchWrap');
+  const plantingSearchInput = document.getElementById('plantingSearchInput');
+  const plantingDropdown = document.getElementById('plantingDropdown');
+  let allPlantings = [];
   const wagonInfo = document.getElementById('wagonInfo');
   const rackInput = document.getElementById('rackInput');
   const manualEntryBtn = document.getElementById('manualEntryBtn');
@@ -470,22 +505,106 @@
     return d.getFullYear() + '-' + String(d.getMonth() + 1).padStart(2, '0') + '-' + String(d.getDate()).padStart(2, '0');
   }
 
-  // Load plantings into dropdown
+  // Load plantings for the searchable picker
   async function loadPlantings() {
     const { data, error } = await db.from('Plantings').select('*');
     if (error) {
-      plantingSelect.innerHTML = '<option value="">Error loading plantings</option>';
+      plantingSearchInput.placeholder = 'Error loading plantings';
       statusEl.textContent = 'Error: ' + error.message;
       return;
     }
-    plantingSelect.innerHTML = '<option value="">-- Select a planting --</option>';
-    data.forEach(p => {
-      const opt = document.createElement('option');
-      opt.value = p['Planting ID'];
-      opt.textContent = `${p['Planting ID']} — ${p['Farm (Linked)']} / ${p['Rows Linked']} (${p['Varieties']})`;
-      plantingSelect.appendChild(opt);
+    allPlantings = data || [];
+    plantingSearchInput.placeholder = 'Type to search plantings (e.g. grower initials)...';
+    plantingSearchInput.disabled = false;
+  }
+
+  function plantingLabel(p) {
+    return `${p['Planting ID']} — ${p['Farm (Linked)']} / ${p['Rows Linked']} (${p['Varieties']})`;
+  }
+
+  // Prefix match against the start of the Planting ID or the farm/grower name —
+  // lets someone type e.g. "bb" for a planting whose ID or farm starts with it.
+  function filterPlantings(query) {
+    const q = query.trim().toLowerCase();
+    if (!q) return allPlantings;
+    return allPlantings.filter(p => {
+      const id = String(p['Planting ID'] || '').toLowerCase();
+      const farm = String(p['Farm (Linked)'] || '').toLowerCase();
+      return id.startsWith(q) || farm.startsWith(q);
     });
   }
+
+  function renderPlantingDropdown(matches) {
+    if (matches.length === 0) {
+      plantingDropdown.innerHTML = '<div class="plantingNoMatch">No matching plantings</div>';
+    } else {
+      plantingDropdown.innerHTML = matches.map((p, i) => `<div class="plantingOption" data-index="${i}">${plantingLabel(p)}</div>`).join('');
+      plantingDropdown.querySelectorAll('.plantingOption').forEach((el, i) => {
+        el.addEventListener('click', () => selectPlanting(matches[i]));
+      });
+    }
+    plantingDropdown.style.display = 'block';
+  }
+
+  function closePlantingDropdown() {
+    plantingDropdown.style.display = 'none';
+    plantingDropdown.innerHTML = '';
+  }
+
+  async function selectPlanting(p) {
+    currentPlanting = p['Planting ID'];
+    plantingSearchInput.value = plantingLabel(p);
+    closePlantingDropdown();
+
+    currentRacks = [];
+    rackLogEl.innerHTML = '';
+    rackCountEl.textContent = '0';
+    bagInput.value = '';
+    binCountInput.value = '';
+    wagonNameInput.value = '';
+
+    statusEl.textContent = 'Loading...';
+    currentWagonNumber = await calcWagonNumber();
+    wagonInfo.textContent = `Planting: ${currentPlanting} — Wagon #${currentWagonNumber} today`;
+    updateFieldEnablement();
+    rackInput.value = '';
+    if (currentMode === 'rack') rackInput.focus();
+    statusEl.textContent = '';
+  }
+
+  plantingSearchInput.addEventListener('focus', () => {
+    plantingSearchInput.select();
+    renderPlantingDropdown(filterPlantings(''));
+  });
+
+  plantingSearchInput.addEventListener('input', () => {
+    if (currentPlanting) {
+      // Typing again after a planting was already chosen invalidates that
+      // selection until they pick (or scan) a new one from the list.
+      currentPlanting = null;
+      wagonInfo.textContent = 'Select a planting to start a wagon.';
+      updateFieldEnablement();
+    }
+    renderPlantingDropdown(filterPlantings(plantingSearchInput.value));
+  });
+
+  plantingSearchInput.addEventListener('keydown', (e) => {
+    if (e.key !== 'Enter') return;
+    e.preventDefault();
+    const matches = filterPlantings(plantingSearchInput.value);
+    if (matches.length === 0) return;
+    const typed = plantingSearchInput.value.trim().toLowerCase();
+    const exact = matches.find(p => String(p['Planting ID'] || '').toLowerCase() === typed);
+    if (exact) {
+      selectPlanting(exact);
+    } else if (matches.length === 1) {
+      selectPlanting(matches[0]);
+    }
+  });
+
+  document.addEventListener('click', (e) => {
+    if (!plantingSearchWrap.contains(e.target)) closePlantingDropdown();
+  });
 
   // Figure out today's wagon number for this planting
   async function calcWagonNumber() {
@@ -816,30 +935,6 @@
   }
 
   dateSearchBtn.addEventListener('click', showDateTotals);
-
-  plantingSelect.addEventListener('change', async () => {
-    currentPlanting = plantingSelect.value;
-    currentRacks = [];
-    rackLogEl.innerHTML = '';
-    rackCountEl.textContent = '0';
-    bagInput.value = '';
-    binCountInput.value = '';
-    wagonNameInput.value = '';
-
-    if (!currentPlanting) {
-      wagonInfo.textContent = 'Select a planting to start a wagon.';
-      updateFieldEnablement();
-      return;
-    }
-
-    statusEl.textContent = 'Loading...';
-    currentWagonNumber = await calcWagonNumber();
-    wagonInfo.textContent = `Planting: ${currentPlanting} — Wagon #${currentWagonNumber} today`;
-    updateFieldEnablement();
-    rackInput.value = '';
-    if (currentMode === 'rack') rackInput.focus();
-    statusEl.textContent = '';
-  });
 
   rackInput.addEventListener('keydown', (e) => {
     if (e.key !== 'Enter') return;
