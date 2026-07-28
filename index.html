@@ -216,26 +216,20 @@
 
   <div id="wagonInfo">Select a planting to start a wagon.</div>
 
+  <h3>2. Plantings on This Wagon</h3>
+  <div id="plantingBlocksContainer"></div>
+
+  <button id="addSegmentBtn" type="button" disabled style="background:#e2e0d6; color:var(--green-dark);">+ Add Another Planting to This Wagon</button>
+
+  <div id="segmentPickerWrap" style="display:none; position:relative; margin-bottom:12px;">
+    <input type="text" id="segmentSearchInput" placeholder="Search planting to add..." autocomplete="off">
+    <div id="segmentDropdown"></div>
+  </div>
+
+  <button id="manualEntryBtn" type="button" style="background:#e2e0d6; color:var(--green-dark);">Manual Entry (show keyboard)</button>
+
   <label for="wagonNameInput" style="display:block; margin-top:8px; font-size:15px; color:#888;">Wagon Name (optional, e.g. W1)</label>
   <input type="text" id="wagonNameInput" placeholder="e.g. W1 (optional)" disabled>
-
-  <div id="rackWagonSection">
-    <h3>2. Scan Racks</h3>
-    <input type="text" id="rackInput" inputmode="none" placeholder="Scan or type rack number, then Enter" disabled>
-    <button id="manualEntryBtn" type="button" style="background:#e2e0d6; color:var(--green-dark); margin-top:-4px;">Manual Entry (show keyboard)</button>
-
-    <h3>3. Total Bags on This Wagon</h3>
-    <input type="number" id="bagInput" placeholder="Enter total bags" disabled>
-
-    <div style="text-align:center; color:#888; margin-bottom:8px;">racks scanned: <span id="rackCount">0</span></div>
-
-    <ul id="rackLog"></ul>
-  </div>
-
-  <div id="binWagonSection" style="display:none;">
-    <h3>2. Number of Bins</h3>
-    <input type="number" id="binCountInput" placeholder="Enter number of bins" disabled>
-  </div>
 
   <button id="finishBtn" disabled>Finish Wagon</button>
   <button id="cancelWagonBtn" disabled style="background:#e74c3c; color:white;">Cancel Wagon</button>
@@ -273,35 +267,13 @@
   const plantingDropdown = document.getElementById('plantingDropdown');
   let allPlantings = [];
   const wagonInfo = document.getElementById('wagonInfo');
-  const rackInput = document.getElementById('rackInput');
+  const plantingBlocksContainer = document.getElementById('plantingBlocksContainer');
   const manualEntryBtn = document.getElementById('manualEntryBtn');
-
-  manualEntryBtn.addEventListener('click', () => {
-    const isManual = rackInput.getAttribute('inputmode') !== 'none';
-    if (isManual) {
-      // Currently manual (keyboard-enabled) — switch to scanner mode (suppress keyboard)
-      rackInput.setAttribute('inputmode', 'none');
-      manualEntryBtn.textContent = 'Manual Entry (show keyboard)';
-    } else {
-      // Currently scanner mode — switch to manual (removing the attribute entirely
-      // is more reliable than setting inputmode="text" for restoring the keyboard on iOS Safari)
-      rackInput.removeAttribute('inputmode');
-      manualEntryBtn.textContent = 'Scanner Mode (hide keyboard)';
-    }
-    rackInput.blur();
-    setTimeout(() => rackInput.focus(), 50);
-  });
-  const bagInput = document.getElementById('bagInput');
   const wagonNameInput = document.getElementById('wagonNameInput');
-  const rackCountEl = document.getElementById('rackCount');
-  const rackLogEl = document.getElementById('rackLog');
   const finishBtn = document.getElementById('finishBtn');
   const cancelWagonBtn = document.getElementById('cancelWagonBtn');
   const modeRackBtn = document.getElementById('modeRackBtn');
   const modeBinBtn = document.getElementById('modeBinBtn');
-  const rackWagonSection = document.getElementById('rackWagonSection');
-  const binWagonSection = document.getElementById('binWagonSection');
-  const binCountInput = document.getElementById('binCountInput');
   const searchInput = document.getElementById('searchInput');
   const searchBtn = document.getElementById('searchBtn');
   const dateSearchInput = document.getElementById('dateSearchInput');
@@ -309,11 +281,33 @@
   const dateTotalsEl = document.getElementById('dateTotals');
   const searchResult = document.getElementById('searchResult');
   const statusEl = document.getElementById('status');
+  const addSegmentBtn = document.getElementById('addSegmentBtn');
+  const segmentPickerWrap = document.getElementById('segmentPickerWrap');
+  const segmentSearchInput = document.getElementById('segmentSearchInput');
+  const segmentDropdown = document.getElementById('segmentDropdown');
 
   let currentPlanting = null;
-  let currentRacks = [];
+  let currentRacks = []; // [{rack_number, segment_planting_id}]
   let currentWagonNumber = null;
   let currentMode = 'rack';
+  let currentSegments = []; // [{planting_id, count}] -- count is bags or bins depending on currentMode
+  let primaryCount = null; // bags (rack mode) or bins (bin mode) entered for the primary planting's block
+  let manualModeOn = false; // global scanner/keyboard toggle, applies to every rack input
+
+  // Global toggle between scanner mode (suppresses the on-screen keyboard,
+  // since a barcode scanner types into whichever rack input is focused) and
+  // manual entry — applies to every planting block's rack input at once,
+  // since it's a device-level preference, not a per-planting one.
+  manualEntryBtn.addEventListener('click', () => {
+    manualModeOn = !manualModeOn;
+    manualEntryBtn.textContent = manualModeOn ? 'Scanner Mode (hide keyboard)' : 'Manual Entry (show keyboard)';
+    plantingBlocksContainer.querySelectorAll('.plantingRackInput').forEach(input => {
+      if (manualModeOn) input.removeAttribute('inputmode'); else input.setAttribute('inputmode', 'none');
+      input.blur();
+    });
+    const firstInput = plantingBlocksContainer.querySelector('.plantingRackInput');
+    if (firstInput) setTimeout(() => firstInput.focus(), 50);
+  });
 
   // ---- OFFLINE SYNC QUEUE ----
   // Wagons (and their racks) that couldn't be saved due to no connection are
@@ -371,7 +365,7 @@
         ${failed.map(item => `
           <div style="background:rgba(255,255,255,0.15); border-radius:6px; padding:8px 10px; margin-bottom:6px; font-size:14px;">
             <div>${item.type === 'bin' ? 'BIN — ' : ''}${item.wagon_name ? item.wagon_name + ' — ' : ''}${item.planting_id} — Wagon #${item.wagon_number}</div>
-            <div>${item.type === 'bin' ? (item.bin_count + ' bins') : (item.total_bags + ' bags, ' + item.racks.length + ' racks: ' + item.racks.join(', '))}</div>
+            <div>${item.type === 'bin' ? (item.bin_count + ' bins') : (item.total_bags + ' bags, ' + item.racks.length + ' racks: ' + item.racks.map(r => r.rack_number).join(', '))}</div>
             <div style="font-size:12px; margin:4px 0; opacity:0.9;">${item.error || 'Unknown error'}</div>
             <button class="retryFailedBtn" data-id="${item.id}" style="background:white; color:#e74c3c; width:auto; padding:6px 12px; font-size:13px; margin:0;">Retry Now</button>
           </div>
@@ -395,6 +389,17 @@
     });
   }
 
+  // The Supabase client (this version, loaded from the CDN) does NOT throw
+  // when a fetch fails outright (dropped connection) — it catches that
+  // internally and resolves with a normal {error} result instead. A genuine
+  // server-side error (RLS denial, bad data, constraint violation) always
+  // carries a real Postgres/PostgREST error code; a swallowed network
+  // failure does not. This tells the two apart so a dropped connection gets
+  // queued for retry instead of being shown as a hard failure.
+  function isNetworkError(error) {
+    return !!error && !error.code;
+  }
+
   // Attempts to save one queued item. Returns 'done' (fully synced, remove
   // from queue), 'retry' (connection issue — try again later, keep as-is),
   // or 'failed' (real server error — flag for manual attention).
@@ -410,6 +415,7 @@
         return 'retry';
       }
       if (result.error) {
+        if (isNetworkError(result.error)) return 'retry';
         item.status = 'failed';
         item.error = 'Saving wagon failed: ' + result.error.message;
         return 'failed';
@@ -423,16 +429,40 @@
       } else {
         let rackResult;
         try {
-          rackResult = await db.from('Racks').insert(item.racks.map(r => ({ wagon_id: item.wagonId, rack_number: r })));
+          rackResult = await db.from('Racks').insert(item.racks.map(r => ({ wagon_id: item.wagonId, rack_number: r.rack_number, segment_planting_id: r.segment_planting_id || null })));
         } catch (networkErr) {
           return 'retry';
         }
         if (rackResult.error) {
+          if (isNetworkError(rackResult.error)) return 'retry';
           item.status = 'failed';
           item.error = `Wagon #${item.wagon_number} saved, but racks failed to save: ${rackResult.error.message}`;
           return 'failed';
         }
         item.racksSaved = true;
+      }
+    }
+
+    if (!item.segmentsSaved) {
+      if (!item.segments || item.segments.length === 0) {
+        item.segmentsSaved = true;
+      } else {
+        const countKey = item.type === 'bin' ? 'bin_count' : 'bag_count';
+        let segResult;
+        try {
+          segResult = await db.from('wagon_extra_segments').insert(
+            item.segments.map(s => ({ wagon_id: item.wagonId, planting_id: s.planting_id, [countKey]: s.count }))
+          );
+        } catch (networkErr) {
+          return 'retry';
+        }
+        if (segResult.error) {
+          if (isNetworkError(segResult.error)) return 'retry';
+          item.status = 'failed';
+          item.error = `Wagon #${item.wagon_number} saved, but the extra planting split failed to save: ${segResult.error.message}`;
+          return 'failed';
+        }
+        item.segmentsSaved = true;
       }
     }
 
@@ -473,26 +503,37 @@
 
   function updateFieldEnablement() {
     const hasPlanting = !!currentPlanting;
-    rackInput.disabled = !(hasPlanting && currentMode === 'rack');
-    bagInput.disabled = !(hasPlanting && currentMode === 'rack');
-    binCountInput.disabled = !(hasPlanting && currentMode === 'bin');
     wagonNameInput.disabled = !hasPlanting;
     finishBtn.disabled = !hasPlanting;
     cancelWagonBtn.disabled = !hasPlanting;
+    addSegmentBtn.disabled = !hasPlanting;
+  }
+
+  // Clears any in-progress extra-planting segments for the current wagon
+  // (used whenever the wagon itself resets: mode switch, new planting picked,
+  // wagon finished/cancelled).
+  function clearSegments() {
+    currentSegments = [];
+    closeSegmentPicker();
+  }
+
+  function closeSegmentPicker() {
+    segmentPickerWrap.style.display = 'none';
+    segmentSearchInput.value = '';
+    segmentDropdown.innerHTML = '';
+    segmentDropdown.style.display = 'none';
   }
 
   function setMode(mode) {
     currentMode = mode;
     modeRackBtn.classList.toggle('tabActive', mode === 'rack');
     modeBinBtn.classList.toggle('tabActive', mode === 'bin');
-    rackWagonSection.style.display = mode === 'rack' ? '' : 'none';
-    binWagonSection.style.display = mode === 'bin' ? '' : 'none';
+    manualEntryBtn.style.display = mode === 'rack' ? '' : 'none';
 
     currentRacks = [];
-    rackLogEl.innerHTML = '';
-    rackCountEl.textContent = '0';
-    bagInput.value = '';
-    binCountInput.value = '';
+    primaryCount = null;
+    clearSegments();
+    renderPlantingBlocks();
 
     updateFieldEnablement();
   }
@@ -557,18 +598,17 @@
     closePlantingDropdown();
 
     currentRacks = [];
-    rackLogEl.innerHTML = '';
-    rackCountEl.textContent = '0';
-    bagInput.value = '';
-    binCountInput.value = '';
+    primaryCount = null;
     wagonNameInput.value = '';
+    clearSegments();
+    renderPlantingBlocks();
 
     statusEl.textContent = 'Loading...';
     currentWagonNumber = await calcWagonNumber();
     wagonInfo.textContent = `Planting: ${currentPlanting} — Wagon #${currentWagonNumber} today`;
     updateFieldEnablement();
-    rackInput.value = '';
-    if (currentMode === 'rack') rackInput.focus();
+    const firstInput = plantingBlocksContainer.querySelector(currentMode === 'rack' ? '.plantingRackInput' : '.plantingCountInput');
+    if (firstInput) firstInput.focus();
     statusEl.textContent = '';
   }
 
@@ -606,6 +646,187 @@
     if (!plantingSearchWrap.contains(e.target)) closePlantingDropdown();
   });
 
+  // ---- EXTRA PLANTING SEGMENTS ----
+  // Lets one wagon record racks/bags/bins split across more than one
+  // planting — mixed loads are a regular daily occurrence, not an edge
+  // case. Every planting on the wagon (the primary one and every added
+  // segment) gets its own block: its own rack-scan box in rack mode, and
+  // its own bag/bin count field. There is no single wagon-level total —
+  // the wagon's stored total is the sum of every block's count.
+
+  function filterSegmentPlantings(query) {
+    const q = query.trim().toLowerCase();
+    const usedIds = new Set([currentPlanting, ...currentSegments.map(s => s.planting_id)]);
+    const pool = allPlantings.filter(p => !usedIds.has(p['Planting ID']));
+    if (!q) return pool;
+    return pool.filter(p => {
+      const id = String(p['Planting ID'] || '').toLowerCase();
+      const farm = String(p['Farm (Linked)'] || '').toLowerCase();
+      return id.startsWith(q) || farm.startsWith(q);
+    });
+  }
+
+  function renderSegmentDropdown(matches) {
+    if (matches.length === 0) {
+      segmentDropdown.innerHTML = '<div class="plantingNoMatch">No matching plantings</div>';
+    } else {
+      segmentDropdown.innerHTML = matches.map((p, i) => `<div class="plantingOption" data-index="${i}">${plantingLabel(p)}</div>`).join('');
+      segmentDropdown.querySelectorAll('.plantingOption').forEach((el, i) => {
+        el.addEventListener('click', () => addSegment(matches[i]));
+      });
+    }
+    segmentDropdown.style.display = 'block';
+  }
+
+  function addSegment(p) {
+    currentSegments.push({ planting_id: p['Planting ID'], count: null });
+    closeSegmentPicker();
+    renderPlantingBlocks();
+    const selector = currentMode === 'rack' ? '.plantingRackInput' : '.plantingCountInput';
+    const newInput = plantingBlocksContainer.querySelector(`.plantingBlock[data-planting="${p['Planting ID']}"] ${selector}`);
+    if (newInput) newInput.focus();
+  }
+
+  function removeSegment(plantingId) {
+    const racksOnSegment = currentRacks.filter(r => r.segment_planting_id === plantingId);
+    if (racksOnSegment.length > 0 && !confirm(`Remove ${plantingId}? This also removes the ${racksOnSegment.length} rack(s) scanned for it.`)) {
+      return;
+    }
+    currentSegments = currentSegments.filter(s => s.planting_id !== plantingId);
+    currentRacks = currentRacks.filter(r => r.segment_planting_id !== plantingId);
+    renderPlantingBlocks();
+  }
+
+  // The list of planting blocks to render: primary first (planting_id null
+  // is the sentinel for "this wagon's own currentPlanting"), then each
+  // added extra segment.
+  function plantingBlocks() {
+    return [{ planting_id: null }].concat(currentSegments.map(s => ({ planting_id: s.planting_id })));
+  }
+
+  function countForBlock(plantingId) {
+    if (plantingId === null) return primaryCount;
+    const seg = currentSegments.find(s => s.planting_id === plantingId);
+    return seg ? seg.count : null;
+  }
+
+  function setCountForBlock(plantingId, value) {
+    if (plantingId === null) {
+      primaryCount = value;
+    } else {
+      const seg = currentSegments.find(s => s.planting_id === plantingId);
+      if (seg) seg.count = value;
+    }
+  }
+
+  function racksForBlock(plantingId) {
+    return currentRacks.filter(r => (r.segment_planting_id || null) === plantingId);
+  }
+
+  function renderPlantingBlocks() {
+    if (!currentPlanting) {
+      plantingBlocksContainer.innerHTML = '';
+      return;
+    }
+
+    plantingBlocksContainer.innerHTML = plantingBlocks().map(b => {
+      const isPrimary = b.planting_id === null;
+      const attr = isPrimary ? '' : b.planting_id;
+      const label = isPrimary ? `Primary: ${currentPlanting}` : b.planting_id;
+      const count = countForBlock(b.planting_id);
+      const removeBtn = isPrimary ? '' : `<button type="button" class="removeSegmentBtn" data-planting="${b.planting_id}" style="background:#e74c3c; color:white; width:auto; padding:6px 12px; font-size:14px; margin-bottom:8px;">Remove This Planting</button>`;
+
+      if (currentMode === 'bin') {
+        return `
+          <div class="plantingBlock" data-planting="${attr}" style="border:1px solid #ddd; border-radius:8px; padding:12px; margin-bottom:12px; background:white;">
+            <div style="font-weight:bold; color:var(--green-dark); margin-bottom:8px;">${label}</div>
+            ${removeBtn}
+            <label style="display:block; font-size:15px; color:#888;">Number of bins</label>
+            <input type="number" class="plantingCountInput" data-planting="${attr}" placeholder="Enter number of bins" value="${count ?? ''}">
+          </div>
+        `;
+      }
+
+      const racks = racksForBlock(b.planting_id);
+      return `
+        <div class="plantingBlock" data-planting="${attr}" style="border:1px solid #ddd; border-radius:8px; padding:12px; margin-bottom:12px; background:white;">
+          <div style="font-weight:bold; color:var(--green-dark); margin-bottom:8px;">${label}</div>
+          ${removeBtn}
+          <input type="text" class="plantingRackInput" placeholder="Scan or type rack number, then Enter" data-planting="${attr}">
+          <div style="text-align:center; color:#888; margin:8px 0;">racks scanned: <span class="plantingRackCount">${racks.length}</span></div>
+          <ul class="plantingRackLog">${racks.slice().reverse().map(r => `<li>Rack ${r.rack_number}</li>`).join('')}</ul>
+          <label style="display:block; margin-top:8px; font-size:15px; color:#888;">Bags from this planting</label>
+          <input type="number" class="plantingCountInput" data-planting="${attr}" placeholder="Enter bags" value="${count ?? ''}">
+        </div>
+      `;
+    }).join('');
+
+    wirePlantingBlockListeners();
+  }
+
+  function wirePlantingBlockListeners() {
+    plantingBlocksContainer.querySelectorAll('.plantingRackInput').forEach(input => {
+      if (manualModeOn) input.removeAttribute('inputmode'); else input.setAttribute('inputmode', 'none');
+
+      input.addEventListener('keydown', (e) => {
+        if (e.key !== 'Enter') return;
+        const rack = input.value.trim();
+        if (rack === '') return;
+        const plantingId = input.dataset.planting || null;
+
+        if (currentRacks.some(r => r.rack_number === rack)) {
+          statusEl.textContent = `Rack ${rack} already scanned on this wagon.`;
+          input.value = '';
+          input.focus();
+          return;
+        }
+
+        currentRacks.push({ rack_number: rack, segment_planting_id: plantingId });
+        const block = input.closest('.plantingBlock');
+        const li = document.createElement('li');
+        li.textContent = `Rack ${rack}`;
+        block.querySelector('.plantingRackLog').prepend(li);
+        block.querySelector('.plantingRackCount').textContent = racksForBlock(plantingId).length;
+
+        input.value = '';
+        input.focus();
+      });
+    });
+
+    plantingBlocksContainer.querySelectorAll('.plantingCountInput').forEach(input => {
+      input.addEventListener('input', () => {
+        const plantingId = input.dataset.planting || null;
+        setCountForBlock(plantingId, input.value === '' ? null : parseInt(input.value));
+      });
+    });
+
+    plantingBlocksContainer.querySelectorAll('.removeSegmentBtn').forEach(btn => {
+      btn.addEventListener('click', () => removeSegment(btn.dataset.planting));
+    });
+  }
+
+  addSegmentBtn.addEventListener('click', () => {
+    segmentPickerWrap.style.display = 'block';
+    segmentSearchInput.value = '';
+    segmentSearchInput.focus();
+    renderSegmentDropdown(filterSegmentPlantings(''));
+  });
+
+  segmentSearchInput.addEventListener('input', () => {
+    renderSegmentDropdown(filterSegmentPlantings(segmentSearchInput.value));
+  });
+
+  segmentSearchInput.addEventListener('keydown', (e) => {
+    if (e.key !== 'Enter') return;
+    e.preventDefault();
+    const matches = filterSegmentPlantings(segmentSearchInput.value);
+    if (matches.length === 1) addSegment(matches[0]);
+  });
+
+  document.addEventListener('click', (e) => {
+    if (!segmentPickerWrap.contains(e.target) && e.target !== addSegmentBtn) closeSegmentPicker();
+  });
+
   // Figure out today's wagon number for this planting
   async function calcWagonNumber() {
     const startOfDay = new Date();
@@ -628,18 +849,21 @@
 
   async function resetRackEntryForNextWagon() {
     currentRacks = [];
-    rackLogEl.innerHTML = '';
-    rackCountEl.textContent = '0';
-    bagInput.value = '';
+    primaryCount = null;
     wagonNameInput.value = '';
+    clearSegments();
+    renderPlantingBlocks();
     currentWagonNumber = await calcWagonNumber();
     wagonInfo.textContent = `Planting: ${currentPlanting} — Wagon #${currentWagonNumber} today`;
-    rackInput.focus();
+    const firstInput = plantingBlocksContainer.querySelector('.plantingRackInput');
+    if (firstInput) firstInput.focus();
   }
 
   async function resetBinEntryForNextWagon() {
-    binCountInput.value = '';
+    primaryCount = null;
     wagonNameInput.value = '';
+    clearSegments();
+    renderPlantingBlocks();
     currentWagonNumber = await calcWagonNumber();
     wagonInfo.textContent = `Planting: ${currentPlanting} — Wagon #${currentWagonNumber} today`;
   }
@@ -648,22 +872,55 @@
   async function getTotalsForRange(startDate, endDate) {
     const { data, error } = await db
       .from('Wagons')
-      .select('planting_id, total_bags, bin_count')
+      .select('id, planting_id, total_bags, bin_count')
       .gte('created_at', startDate.toISOString())
       .lt('created_at', endDate.toISOString());
     if (error) return { error };
 
-    const wagonCount = data ? data.length : 0;
-    const bagSum = data ? data.reduce((sum, w) => sum + (w.total_bags || 0), 0) : 0;
-    const binSum = data ? data.reduce((sum, w) => sum + (w.bin_count || 0), 0) : 0;
+    const wagons = data || [];
+    const wagonCount = wagons.length;
+    const bagSum = wagons.reduce((sum, w) => sum + (w.total_bags || 0), 0);
+    const binSum = wagons.reduce((sum, w) => sum + (w.bin_count || 0), 0);
+
+    // By-planting breakdown needs to re-slice mixed wagons across their
+    // extra segments, so the primary planting isn't credited with bags/bins
+    // that actually came from a different field.
+    let segments = [];
+    const wagonIds = wagons.map(w => w.id);
+    if (wagonIds.length > 0) {
+      const { data: segData, error: segError } = await db
+        .from('wagon_extra_segments')
+        .select('wagon_id, planting_id, bag_count, bin_count')
+        .in('wagon_id', wagonIds);
+      if (segError) return { error: segError };
+      segments = segData || [];
+    }
+    const segByWagon = {};
+    segments.forEach(s => {
+      (segByWagon[s.wagon_id] = segByWagon[s.wagon_id] || []).push(s);
+    });
 
     const byPlanting = {};
-    (data || []).forEach(w => {
-      const key = w.planting_id || '(unknown)';
+    function addToPlanting(key, wagonInc, bags, bins) {
       if (!byPlanting[key]) byPlanting[key] = { wagons: 0, bags: 0, bins: 0 };
-      byPlanting[key].wagons += 1;
-      byPlanting[key].bags += (w.total_bags || 0);
-      byPlanting[key].bins += (w.bin_count || 0);
+      byPlanting[key].wagons += wagonInc;
+      byPlanting[key].bags += bags;
+      byPlanting[key].bins += bins;
+    }
+    // Note: a mixed wagon is counted once under its primary planting AND
+    // once under each extra segment planting, so these per-row wagon counts
+    // can sum to more than wagonCount above — that's intentional, not a bug.
+    wagons.forEach(w => {
+      const key = w.planting_id || '(unknown)';
+      const wSegs = segByWagon[w.id] || [];
+      const segBagSum = wSegs.reduce((s, seg) => s + (seg.bag_count || 0), 0);
+      const segBinSum = wSegs.reduce((s, seg) => s + (seg.bin_count || 0), 0);
+      const primaryBags = Math.max((w.total_bags || 0) - segBagSum, 0);
+      const primaryBins = Math.max((w.bin_count || 0) - segBinSum, 0);
+      addToPlanting(key, 1, primaryBags, primaryBins);
+      wSegs.forEach(seg => {
+        addToPlanting(seg.planting_id || '(unknown)', 1, seg.bag_count || 0, seg.bin_count || 0);
+      });
     });
 
     return { wagonCount, bagSum, binSum, byPlanting };
@@ -776,14 +1033,85 @@
         <button class="deleteEditBtn" style="background:#e74c3c; color:white; flex:1;">Delete</button>
         <button class="cancelEditBtn" style="background:#ccc; color:#333; flex:1;">Cancel</button>
       </div>
+      <div style="font-weight:bold; margin-bottom:6px;">Extra Plantings on This Wagon</div>
+      <div class="segmentListArea">Loading...</div>
+      <div style="display:flex; gap:8px; margin:8px 0 12px; flex-wrap:wrap;">
+        <select class="addSegmentSelect" style="flex:1; min-width:140px; margin-bottom:0;"></select>
+        <input type="number" class="addSegmentCountInput" placeholder="${isBin ? 'Bins' : 'Bags'}" style="flex:0 0 90px; margin-bottom:0;">
+        <button class="addSegmentBtn" style="background:#2c3e50; color:white; flex:0 0 auto; width:auto; padding:10px 16px;">Add</button>
+      </div>
       ${isBin ? '' : `
       <div style="font-weight:bold; margin-bottom:6px;">Racks on this wagon</div>
       <div class="rackListArea">Loading racks...</div>
       <div style="display:flex; gap:8px; margin-top:8px;">
         <input type="text" class="addRackInput" placeholder="Add rack number">
+        <select class="addRackPlantingSelect" style="display:none; flex:0 0 140px; margin-bottom:0;"></select>
         <button class="addRackBtn" style="background:#2c3e50; color:white; flex:0 0 auto; width:auto; padding:10px 16px;">Add</button>
       </div>`}
     `;
+
+    // Extra-planting segments recorded on this wagon so far. Populated by
+    // refreshSegmentList() and read by refreshRackList() (for the per-rack
+    // planting selector) and the manual add-rack planting selector.
+    let editorSegments = [];
+
+    function populateAddSegmentSelect() {
+      const sel = row.querySelector('.addSegmentSelect');
+      const usedIds = new Set([wagon.planting_id, ...editorSegments.map(s => s.planting_id)]);
+      const options = allPlantings.filter(p => !usedIds.has(p['Planting ID']));
+      sel.innerHTML = options.length === 0
+        ? '<option value="">No other plantings available</option>'
+        : options.map(p => `<option value="${p['Planting ID']}">${plantingLabel(p)}</option>`).join('');
+    }
+
+    function updateAddRackPlantingSelect() {
+      if (isBin) return;
+      const sel = row.querySelector('.addRackPlantingSelect');
+      if (editorSegments.length > 0) {
+        sel.style.display = '';
+        sel.innerHTML = `<option value="">${wagon.planting_id} (primary)</option>` +
+          editorSegments.map(s => `<option value="${s.planting_id}">${s.planting_id}</option>`).join('');
+      } else {
+        sel.style.display = 'none';
+        sel.innerHTML = '';
+      }
+    }
+
+    async function refreshSegmentList() {
+      const { data: segs, error } = await db
+        .from('wagon_extra_segments')
+        .select('*')
+        .eq('wagon_id', wagon.id)
+        .order('id', { ascending: true });
+      const area = row.querySelector('.segmentListArea');
+      if (error) {
+        area.textContent = 'Error loading extra plantings: ' + error.message;
+        return;
+      }
+      editorSegments = segs || [];
+      if (editorSegments.length === 0) {
+        area.innerHTML = '<div style="color:#888;">No extra plantings on this wagon.</div>';
+      } else {
+        area.innerHTML = editorSegments.map(s => `
+          <div style="display:flex; justify-content:space-between; align-items:center; background:#f4f4f4; padding:6px 10px; border-radius:4px; margin-bottom:4px;">
+            <span>${s.planting_id} — ${isBin ? (s.bin_count || 0) + ' bins' : (s.bag_count || 0) + ' bags'}</span>
+            <button class="removeSegmentEditBtn" data-id="${s.id}" style="background:#e74c3c; color:white; width:auto; padding:4px 10px; font-size:15px;">Remove</button>
+          </div>
+        `).join('');
+        area.querySelectorAll('.removeSegmentEditBtn').forEach(btn => {
+          btn.addEventListener('click', async (e) => {
+            e.stopPropagation();
+            await db.from('wagon_extra_segments').delete().eq('id', btn.dataset.id);
+            await refreshSegmentList();
+            if (!isBin) await refreshRackList();
+            refreshTodayTotals();
+            refreshSeasonTotals();
+          });
+        });
+      }
+      populateAddSegmentSelect();
+      updateAddRackPlantingSelect();
+    }
 
     async function refreshRackList() {
       const { data: racks, error } = await db
@@ -800,9 +1128,16 @@
         area.innerHTML = '<div style="color:#888;">No racks logged for this wagon.</div>';
         return;
       }
+      const hasSegments = editorSegments.length > 0;
       area.innerHTML = racks.map(r => `
-        <div style="display:flex; justify-content:space-between; align-items:center; background:#f4f4f4; padding:6px 10px; border-radius:4px; margin-bottom:4px;">
+        <div style="display:flex; justify-content:space-between; align-items:center; background:#f4f4f4; padding:6px 10px; border-radius:4px; margin-bottom:4px; gap:8px;">
           <span>${r.rack_number}</span>
+          ${hasSegments ? `
+            <select class="rackSegmentSelect" data-id="${r.id}" style="flex:1; margin-bottom:0;">
+              <option value="" ${!r.segment_planting_id ? 'selected' : ''}>${wagon.planting_id} (primary)</option>
+              ${editorSegments.map(s => `<option value="${s.planting_id}" ${r.segment_planting_id === s.planting_id ? 'selected' : ''}>${s.planting_id}</option>`).join('')}
+            </select>
+          ` : ''}
           <button class="removeRackBtn" data-id="${r.id}" style="background:#e74c3c; color:white; width:auto; padding:4px 10px; font-size:15px;">Remove</button>
         </div>
       `).join('');
@@ -814,7 +1149,17 @@
           refreshRackList();
         });
       });
+
+      area.querySelectorAll('.rackSegmentSelect').forEach(sel => {
+        sel.addEventListener('click', (e) => e.stopPropagation());
+        sel.addEventListener('change', async (e) => {
+          e.stopPropagation();
+          await db.from('Racks').update({ segment_planting_id: sel.value || null }).eq('id', sel.dataset.id);
+        });
+      });
     }
+
+    await refreshSegmentList();
 
     if (!isBin) {
       await refreshRackList();
@@ -824,7 +1169,9 @@
         const input = row.querySelector('.addRackInput');
         const rackNum = input.value.trim();
         if (!rackNum) return;
-        await db.from('Racks').insert([{ wagon_id: wagon.id, rack_number: rackNum }]);
+        const plantingSel = row.querySelector('.addRackPlantingSelect');
+        const segmentPlantingId = (plantingSel && plantingSel.style.display !== 'none') ? (plantingSel.value || null) : null;
+        await db.from('Racks').insert([{ wagon_id: wagon.id, rack_number: rackNum, segment_planting_id: segmentPlantingId }]);
         input.value = '';
         refreshRackList();
       });
@@ -834,10 +1181,36 @@
       });
     }
 
+    row.querySelector('.addSegmentBtn').addEventListener('click', async (e) => {
+      e.stopPropagation();
+      const sel = row.querySelector('.addSegmentSelect');
+      const plantingId = sel.value;
+      if (!plantingId) return;
+      const countInput = row.querySelector('.addSegmentCountInput');
+      const count = parseInt(countInput.value);
+      if (!count || count <= 0) return;
+      const countKey = isBin ? 'bin_count' : 'bag_count';
+      const { error } = await db.from('wagon_extra_segments').insert([{ wagon_id: wagon.id, planting_id: plantingId, [countKey]: count }]);
+      if (error) {
+        alert('Error adding extra planting: ' + error.message);
+        return;
+      }
+      countInput.value = '';
+      await refreshSegmentList();
+      if (!isBin) await refreshRackList();
+      refreshTodayTotals();
+      refreshSeasonTotals();
+    });
+
     row.querySelector('.saveEditBtn').addEventListener('click', async (e) => {
       e.stopPropagation();
       const newCount = parseInt(row.querySelector('.editCountInput').value);
       if (!newCount || newCount <= 0) return;
+      const segSum = editorSegments.reduce((s, seg) => s + (isBin ? (seg.bin_count || 0) : (seg.bag_count || 0)), 0);
+      if (newCount < segSum) {
+        alert(`Total must be at least ${segSum} (the sum of extra planting ${isBin ? 'bins' : 'bags'} already recorded on this wagon).`);
+        return;
+      }
       const newTimeLocal = row.querySelector('.editTimeInput').value; // e.g. "2026-07-21T14:30"
       if (!newTimeLocal) return;
       const newTimeISO = new Date(newTimeLocal).toISOString();
@@ -852,8 +1225,9 @@
 
     row.querySelector('.deleteEditBtn').addEventListener('click', async (e) => {
       e.stopPropagation();
-      if (!confirm(`Delete Wagon #${wagon.wagon_number} (${wagon.planting_id})? This also removes its scanned racks.`)) return;
+      if (!confirm(`Delete Wagon #${wagon.wagon_number} (${wagon.planting_id})? This also removes its scanned racks and extra plantings.`)) return;
       await db.from('Racks').delete().eq('wagon_id', wagon.id);
+      await db.from('wagon_extra_segments').delete().eq('wagon_id', wagon.id);
       await db.from('Wagons').delete().eq('id', wagon.id);
       loadRecentWagons();
       refreshTodayTotals();
@@ -936,42 +1310,94 @@
 
   dateSearchBtn.addEventListener('click', showDateTotals);
 
-  rackInput.addEventListener('keydown', (e) => {
-    if (e.key !== 'Enter') return;
-    const rack = rackInput.value.trim();
-    if (rack === '') return;
-
-    if (currentRacks.includes(rack)) {
-      statusEl.textContent = `Rack ${rack} already scanned on this wagon.`;
-      rackInput.value = '';
-      rackInput.focus();
-      return;
+  // Every planting block (primary + each added segment) needs its own
+  // positive count before the wagon can be finished. Returns an error
+  // message string, or null if OK.
+  function validatePlantingCounts() {
+    const unit = currentMode === 'bin' ? 'bins' : 'bags';
+    if (!primaryCount || primaryCount <= 0) {
+      return `Enter the ${unit} for ${currentPlanting} before finishing.`;
     }
+    for (const s of currentSegments) {
+      if (!s.count || s.count <= 0) {
+        return `Enter the ${unit} for ${s.planting_id} before finishing.`;
+      }
+    }
+    return null;
+  }
 
-    currentRacks.push(rack);
-    const li = document.createElement('li');
-    li.textContent = `Rack ${rack}`;
-    rackLogEl.prepend(li);
-    rackCountEl.textContent = currentRacks.length;
+  function totalCount() {
+    return primaryCount + currentSegments.reduce((sum, s) => sum + s.count, 0);
+  }
 
-    rackInput.value = '';
-    rackInput.focus();
-  });
+  function segmentSummaryText() {
+    if (currentSegments.length === 0) return '';
+    const parts = [`${currentPlanting} (primary) ${primaryCount}`].concat(
+      currentSegments.map(s => `${s.planting_id} ${s.count}`)
+    );
+    return ` — split: ${parts.join(', ')}`;
+  }
+
+  // Saves currentSegments for an already-saved wagon (wagon + racks, if any,
+  // already committed). Returns null on success, 'queued' if a network error
+  // queued them for later sync via the same offline queue, or an error
+  // message string on a genuine server error.
+  async function saveSegments(wagonId, countKey, queueBaseItem) {
+    if (currentSegments.length === 0) return null;
+    const segRows = currentSegments.map(s => ({ wagon_id: wagonId, planting_id: s.planting_id, [countKey]: s.count }));
+    let networkFailure = false;
+    try {
+      const { error } = await db.from('wagon_extra_segments').insert(segRows);
+      if (error) {
+        if (isNetworkError(error)) networkFailure = true;
+        else return error.message;
+      } else {
+        return null;
+      }
+    } catch (networkErr) {
+      networkFailure = true;
+    }
+    if (networkFailure) {
+      enqueueItem({
+        ...queueBaseItem,
+        id: genId(),
+        wagonId,
+        racksSaved: true,
+        segmentsSaved: false,
+        segments: currentSegments.map(s => ({ planting_id: s.planting_id, count: s.count })),
+        status: 'pending',
+        error: null,
+        createdAt: new Date().toISOString()
+      });
+      return 'queued';
+    }
+  }
 
   finishBtn.addEventListener('click', async () => {
     if (!currentPlanting) return;
 
+    const validationError = validatePlantingCounts();
+    if (validationError) {
+      statusEl.textContent = validationError;
+      return;
+    }
+
     if (currentMode === 'bin') {
-      const binCount = parseInt(binCountInput.value);
-      if (!binCount || binCount <= 0) {
-        statusEl.textContent = 'Enter the number of bins for this wagon before finishing.';
-        return;
-      }
+      const binCount = totalCount();
 
       finishBtn.disabled = true;
       statusEl.textContent = 'Saving...';
 
-      let binError;
+      const queueBase = {
+        type: 'bin',
+        planting_id: currentPlanting,
+        wagon_number: currentWagonNumber,
+        wagon_name: wagonNameInput.value.trim() || null,
+        bin_count: binCount,
+        racks: []
+      };
+
+      let binData, binError, binNetworkFailure = false;
       try {
         const result = await db
           .from('Wagons')
@@ -981,17 +1407,22 @@
             wagon_name: wagonNameInput.value.trim() || null,
             wagon_type: 'bin',
             bin_count: binCount
-          }]);
+          }])
+          .select();
+        binData = result.data;
         binError = result.error;
+        if (binError && isNetworkError(binError)) binNetworkFailure = true;
       } catch (networkErr) {
+        binNetworkFailure = true;
+      }
+
+      if (binNetworkFailure) {
         enqueueItem({
+          ...queueBase,
           id: genId(),
-          type: 'bin',
-          planting_id: currentPlanting,
-          wagon_number: currentWagonNumber,
-          wagon_name: wagonNameInput.value.trim() || null,
-          bin_count: binCount,
+          segments: currentSegments.map(s => ({ planting_id: s.planting_id, count: s.count })),
           wagonId: null,
+          segmentsSaved: false,
           status: 'pending',
           error: null,
           createdAt: new Date().toISOString()
@@ -1008,7 +1439,21 @@
         return;
       }
 
-      statusEl.textContent = `Wagon #${currentWagonNumber} saved with ${binCount} bins.`;
+      const binWagonId = binData[0].id;
+      const segResult = await saveSegments(binWagonId, 'bin_count', queueBase);
+      if (segResult === 'queued') {
+        statusEl.textContent = `Wagon #${currentWagonNumber} saved, but the connection dropped before the extra planting split saved — it's queued and will sync automatically.`;
+        await resetBinEntryForNextWagon();
+        finishBtn.disabled = false;
+        return;
+      }
+      if (segResult) {
+        statusEl.textContent = `Wagon saved, but error saving the extra planting split: ${segResult}`;
+        finishBtn.disabled = false;
+        return;
+      }
+
+      statusEl.textContent = `Wagon #${currentWagonNumber} saved with ${binCount} bins${segmentSummaryText()}.`;
       refreshTodayTotals();
       refreshSeasonTotals();
       loadRecentWagons();
@@ -1022,11 +1467,7 @@
       statusEl.textContent = 'No racks scanned yet — nothing to save.';
       return;
     }
-    const bagTotal = parseInt(bagInput.value);
-    if (!bagTotal || bagTotal <= 0) {
-      statusEl.textContent = 'Enter the total bags for this wagon before finishing.';
-      return;
-    }
+    const bagTotal = totalCount();
     if (bagTotal > 2000) {
       statusEl.textContent = `That bag count (${bagTotal}) looks too high — a scan may have landed in this field by mistake. Please re-check and re-enter it.`;
       return;
@@ -1035,7 +1476,15 @@
     finishBtn.disabled = true;
     statusEl.textContent = 'Saving...';
 
-    let wagonData, wagonError;
+    const queueBase = {
+      type: 'rack',
+      planting_id: currentPlanting,
+      wagon_number: currentWagonNumber,
+      wagon_name: wagonNameInput.value.trim() || null,
+      total_bags: bagTotal
+    };
+
+    let wagonData, wagonError, wagonNetworkFailure = false;
     try {
       const result = await db
         .from('Wagons')
@@ -1048,17 +1497,20 @@
         .select();
       wagonData = result.data;
       wagonError = result.error;
+      if (wagonError && isNetworkError(wagonError)) wagonNetworkFailure = true;
     } catch (networkErr) {
+      wagonNetworkFailure = true;
+    }
+
+    if (wagonNetworkFailure) {
       enqueueItem({
+        ...queueBase,
         id: genId(),
-        type: 'rack',
-        planting_id: currentPlanting,
-        wagon_number: currentWagonNumber,
-        wagon_name: wagonNameInput.value.trim() || null,
-        total_bags: bagTotal,
         racks: currentRacks.slice(),
+        segments: currentSegments.map(s => ({ planting_id: s.planting_id, count: s.count })),
         wagonId: null,
         racksSaved: false,
+        segmentsSaved: false,
         status: 'pending',
         error: null,
         createdAt: new Date().toISOString()
@@ -1078,22 +1530,25 @@
     const wagonId = wagonData[0].id;
 
     // Insert rack rows
-    const rackRows = currentRacks.map(r => ({ wagon_id: wagonId, rack_number: r }));
-    let rackError;
+    const rackRows = currentRacks.map(r => ({ wagon_id: wagonId, rack_number: r.rack_number, segment_planting_id: r.segment_planting_id }));
+    let rackError, rackNetworkFailure = false;
     try {
       const rackResult = await db.from('Racks').insert(rackRows);
       rackError = rackResult.error;
+      if (rackError && isNetworkError(rackError)) rackNetworkFailure = true;
     } catch (networkErr) {
+      rackNetworkFailure = true;
+    }
+
+    if (rackNetworkFailure) {
       enqueueItem({
+        ...queueBase,
         id: genId(),
-        type: 'rack',
-        planting_id: currentPlanting,
-        wagon_number: currentWagonNumber,
-        wagon_name: wagonNameInput.value.trim() || null,
-        total_bags: bagTotal,
         racks: currentRacks.slice(),
+        segments: currentSegments.map(s => ({ planting_id: s.planting_id, count: s.count })),
         wagonId: wagonId,
         racksSaved: false,
+        segmentsSaved: false,
         status: 'pending',
         error: null,
         createdAt: new Date().toISOString()
@@ -1110,7 +1565,20 @@
       return;
     }
 
-    statusEl.textContent = `Wagon #${currentWagonNumber} saved with ${bagTotal} bags (${currentRacks.length} racks).`;
+    const segResult = await saveSegments(wagonId, 'bag_count', queueBase);
+    if (segResult === 'queued') {
+      statusEl.textContent = `Wagon #${currentWagonNumber} and racks saved, but the connection dropped before the extra planting split saved — it's queued and will sync automatically.`;
+      await resetRackEntryForNextWagon();
+      finishBtn.disabled = false;
+      return;
+    }
+    if (segResult) {
+      statusEl.textContent = `Wagon and racks saved, but error saving the extra planting split: ${segResult}`;
+      finishBtn.disabled = false;
+      return;
+    }
+
+    statusEl.textContent = `Wagon #${currentWagonNumber} saved with ${bagTotal} bags (${currentRacks.length} racks)${segmentSummaryText()}.`;
     refreshTodayTotals();
     refreshSeasonTotals();
     loadRecentWagons();
@@ -1174,7 +1642,14 @@
 
     const w = wagonMatches[0];
     const when = new Date(w.created_at).toLocaleString();
-    searchResult.textContent = `Rack ${rackNumber} — Planting: ${w.planting_id} — Wagon #${w.wagon_number} — ${when}`;
+    const rack = rackMatches[0];
+    const actualPlanting = rack.segment_planting_id || w.planting_id;
+    let text = `Rack ${rackNumber} — Planting: ${actualPlanting}`;
+    if (rack.segment_planting_id) {
+      text += ` (wagon's primary planting: ${w.planting_id})`;
+    }
+    text += ` — Wagon #${w.wagon_number} — ${when}`;
+    searchResult.textContent = text;
   }
 
   searchBtn.addEventListener('click', searchRack);
