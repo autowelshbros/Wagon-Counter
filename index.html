@@ -226,8 +226,6 @@
     <div id="segmentDropdown"></div>
   </div>
 
-  <button id="manualEntryBtn" type="button" style="background:#e2e0d6; color:var(--green-dark);">Manual Entry (show keyboard)</button>
-
   <label for="wagonNameInput" style="display:block; margin-top:8px; font-size:15px; color:#888;">Wagon Name (optional, e.g. W1)</label>
   <input type="text" id="wagonNameInput" placeholder="e.g. W1 (optional)" disabled>
 
@@ -268,7 +266,6 @@
   let allPlantings = [];
   const wagonInfo = document.getElementById('wagonInfo');
   const plantingBlocksContainer = document.getElementById('plantingBlocksContainer');
-  const manualEntryBtn = document.getElementById('manualEntryBtn');
   const wagonNameInput = document.getElementById('wagonNameInput');
   const finishBtn = document.getElementById('finishBtn');
   const cancelWagonBtn = document.getElementById('cancelWagonBtn');
@@ -294,20 +291,27 @@
   let primaryCount = null; // bags (rack mode) or bins (bin mode) entered for the primary planting's block
   let manualModeOn = false; // global scanner/keyboard toggle, applies to every rack input
 
-  // Global toggle between scanner mode (suppresses the on-screen keyboard,
-  // since a barcode scanner types into whichever rack input is focused) and
-  // manual entry — applies to every planting block's rack input at once,
-  // since it's a device-level preference, not a per-planting one.
-  manualEntryBtn.addEventListener('click', () => {
+  function manualEntryLabel() {
+    return manualModeOn ? 'Scanner Mode (hide keyboard)' : 'Manual Entry (show keyboard)';
+  }
+
+  // Toggles between scanner mode (suppresses the on-screen keyboard, since a
+  // barcode scanner types into whichever rack input is focused) and manual
+  // entry. Each planting block has its own button sitting under its own rack
+  // field, but the setting itself is device-level, so flipping it from any
+  // block applies to every rack input and relabels every button.
+  function toggleManualMode(blockToRefocus) {
     manualModeOn = !manualModeOn;
-    manualEntryBtn.textContent = manualModeOn ? 'Scanner Mode (hide keyboard)' : 'Manual Entry (show keyboard)';
     plantingBlocksContainer.querySelectorAll('.plantingRackInput').forEach(input => {
       if (manualModeOn) input.removeAttribute('inputmode'); else input.setAttribute('inputmode', 'none');
       input.blur();
     });
-    const firstInput = plantingBlocksContainer.querySelector('.plantingRackInput');
-    if (firstInput) setTimeout(() => firstInput.focus(), 50);
-  });
+    plantingBlocksContainer.querySelectorAll('.manualEntryBtn').forEach(btn => {
+      btn.textContent = manualEntryLabel();
+    });
+    const input = blockToRefocus && blockToRefocus.querySelector('.plantingRackInput');
+    if (input) setTimeout(() => input.focus(), 50);
+  }
 
   // ---- OFFLINE SYNC QUEUE ----
   // Wagons (and their racks) that couldn't be saved due to no connection are
@@ -528,7 +532,6 @@
     currentMode = mode;
     modeRackBtn.classList.toggle('tabActive', mode === 'rack');
     modeBinBtn.classList.toggle('tabActive', mode === 'bin');
-    manualEntryBtn.style.display = mode === 'rack' ? '' : 'none';
 
     currentRacks = [];
     primaryCount = null;
@@ -753,6 +756,7 @@
           <div style="font-weight:bold; color:var(--green-dark); margin-bottom:8px;">${label}</div>
           ${removeBtn}
           <input type="text" class="plantingRackInput" placeholder="Scan or type rack number, then Enter" data-planting="${attr}">
+          <button type="button" class="manualEntryBtn" style="background:#e2e0d6; color:var(--green-dark); margin-top:-4px;">${manualEntryLabel()}</button>
           <div style="text-align:center; color:#888; margin:8px 0;">racks scanned: <span class="plantingRackCount">${racks.length}</span></div>
           <ul class="plantingRackLog">${racks.slice().reverse().map(r => `<li>Rack ${r.rack_number}</li>`).join('')}</ul>
           <label style="display:block; margin-top:8px; font-size:15px; color:#888;">Bags from this planting</label>
@@ -802,6 +806,10 @@
 
     plantingBlocksContainer.querySelectorAll('.removeSegmentBtn').forEach(btn => {
       btn.addEventListener('click', () => removeSegment(btn.dataset.planting));
+    });
+
+    plantingBlocksContainer.querySelectorAll('.manualEntryBtn').forEach(btn => {
+      btn.addEventListener('click', () => toggleManualMode(btn.closest('.plantingBlock')));
     });
   }
 
