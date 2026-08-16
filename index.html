@@ -150,7 +150,7 @@
 </header>
 
 <div style="display:flex; align-items:center; justify-content:center; gap:10px; margin-bottom:8px; flex-wrap:wrap;">
-  <span style="font-size:12px; color:#999;">Build: 2026-08-16 v16</span>
+  <span style="font-size:12px; color:#999;">Build: 2026-08-16 v17</span>
   <button id="checkUpdatesBtn" type="button" style="width:auto; margin:0; padding:6px 12px; font-size:12px; font-weight:600; background:#e2e0d6; color:var(--green-dark); border-radius:6px;">&#8635; Check for updates</button>
 </div>
 
@@ -197,8 +197,10 @@
     planting they actually came from, not the wagon's primary planting.
     <strong>Bag-Eq</strong> converts bins to bags at 1 bin = 12 bags (600 cobs
     per bin ÷ 50 per bag) and adds them to the bags, so Bag-Eq/ac is the yield
-    with bins included. Bags/ac still counts bags alone. Tap a column heading to
-    re-sort; the table scrolls sideways on a narrow screen.
+    with bins included. Bags/ac still counts bags alone. Use the dropdown to
+    view one farm at a time. Tap a column heading to re-sort — sorting on Farm
+    groups each farm's fields together, in planting order. The table scrolls
+    sideways on a narrow screen.
   </div>
   <div id="yieldReport" style="margin-bottom:16px;"></div>
 </div>
@@ -1378,6 +1380,8 @@
   // for both bags and bins.
   let yieldSort = { key: 'combinedPerAcre', dir: 'desc' };
   let yieldRows = null;
+  // '' means every farm. Survives re-sorts and data refreshes.
+  let yieldFarmFilter = '';
 
   async function refreshYieldReport() {
     const container = document.getElementById('yieldReport');
@@ -1430,7 +1434,11 @@
     });
 
     const acresById = {};
-    allPlantings.forEach(p => { acresById[p['Planting ID']] = p['Planted Acres']; });
+    const farmById = {};
+    allPlantings.forEach(p => {
+      acresById[p['Planting ID']] = p['Planted Acres'];
+      farmById[p['Planting ID']] = p['Farm (Linked)'];
+    });
 
     yieldRows = Object.keys(byPlanting).map(key => {
       const p = byPlanting[key];
@@ -1442,6 +1450,7 @@
       const bagEquiv = p.bags + p.bins * BAGS_PER_BIN_EQUIVALENT;
       return {
         plantingId: key,
+        farm: farmById[key] || '(no farm)',
         bags: p.bags,
         bins: p.bins,
         bagEquiv,
@@ -1462,10 +1471,25 @@
       return;
     }
 
+    const farms = [...new Set(yieldRows.map(r => r.farm))].sort((a, b) => a.localeCompare(b));
+    // A filter for a farm that no longer has confirmed wagons would show an
+    // empty table with no way back, so fall back to showing everything.
+    if (yieldFarmFilter && !farms.includes(yieldFarmFilter)) yieldFarmFilter = '';
+    const visibleRows = yieldFarmFilter
+      ? yieldRows.filter(r => r.farm === yieldFarmFilter)
+      : yieldRows.slice();
+
     // Rows with no acres on file can't have a yield — they always sort last
     // rather than being treated as zero, which would fake a worst-yield row.
     const dir = yieldSort.dir === 'asc' ? 1 : -1;
-    const rows = yieldRows.slice().sort((a, b) => {
+    const rows = visibleRows.sort((a, b) => {
+      // Sorting by farm groups the farm's fields together, then orders them by
+      // planting ID A-Z inside the group — always ascending, so a field keeps
+      // the same place in its farm whichever way the farms are ordered.
+      if (yieldSort.key === 'farm') {
+        const byFarm = a.farm.localeCompare(b.farm) * dir;
+        return byFarm !== 0 ? byFarm : a.plantingId.localeCompare(b.plantingId);
+      }
       const av = a[yieldSort.key], bv = b[yieldSort.key];
       if (av === null && bv === null) return a.plantingId.localeCompare(b.plantingId);
       if (av === null) return 1;
@@ -1474,7 +1498,7 @@
       return (av - bv) * dir;
     });
 
-    const showBins = yieldRows.some(r => r.bins > 0);
+    const showBins = visibleRows.some(r => r.bins > 0);
     const num = (v, places) => v === null ? '—'
       : v.toLocaleString(undefined, { minimumFractionDigits: places, maximumFractionDigits: places });
 
@@ -1492,12 +1516,19 @@
       { key: 'acres', label: 'Acres', align: 'right', fmt: r => num(r.acres, 2) },
       { key: 'bagsPerAcre', label: 'Bags/ac', align: 'right', fmt: r => num(r.bagsPerAcre, 1) }
     ];
+    // Filtered to a single farm, every row would repeat the same farm name and
+    // sorting on it would do nothing — the dropdown already says which farm
+    // this is, so the column only earns its width when farms are mixed.
+    if (!yieldFarmFilter) {
+      columns.splice(1, 0, { key: 'farm', label: 'Farm', align: 'left', wrap: true, fmt: r => r.farm });
+    }
     // With no bins anywhere in the report, Bag-Eq would just repeat Bags and
     // Bag-Eq/ac would just repeat Bags/ac, so the bin-derived columns only
     // appear once there are bins to convert.
     if (showBins) {
-      columns.splice(2, 0, { key: 'bins', label: 'Bins', align: 'right', fmt: r => num(r.bins, 0) });
-      columns.splice(3, 0, { key: 'bagEquiv', label: 'Bag-Eq', align: 'right', fmt: r => num(r.bagEquiv, 0) });
+      const bagsAt = columns.findIndex(c => c.key === 'bags');
+      columns.splice(bagsAt + 1, 0, { key: 'bins', label: 'Bins', align: 'right', fmt: r => num(r.bins, 0) });
+      columns.splice(bagsAt + 2, 0, { key: 'bagEquiv', label: 'Bag-Eq', align: 'right', fmt: r => num(r.bagEquiv, 0) });
       columns.push({ key: 'combinedPerAcre', label: 'Bag-Eq/ac', align: 'right', fmt: r => num(r.combinedPerAcre, 1) });
     }
 
@@ -1507,6 +1538,9 @@
     const activeKey = columns.some(c => c.key === yieldSort.key) ? yieldSort.key
       : yieldSort.key === 'combinedPerAcre' ? 'bagsPerAcre'
       : yieldSort.key === 'bagEquiv' ? 'bags'
+      // Farm sort inside a single-farm filter reduces to its tiebreaker,
+      // planting ID A-Z, which is the heading the arrow belongs on.
+      : yieldSort.key === 'farm' ? 'plantingId'
       : yieldSort.key;
 
     const head = columns.map(c => {
@@ -1524,18 +1558,30 @@
       return `<tr>${cells}</tr>`;
     }).join('');
 
-    const missingAcres = yieldRows.filter(r => r.acres === null).length;
+    const missingAcres = rows.filter(r => r.acres === null).length;
     const footnote = missingAcres > 0
       ? `<div style="font-size:13px; color:#888; margin-top:8px;">${missingAcres} planting${missingAcres === 1 ? '' : 's'} ha${missingAcres === 1 ? 's' : 've'} no Planted Acres on file — bags are shown, yield can't be calculated.</div>`
       : '';
 
+    const farmOptions = [`<option value=""${yieldFarmFilter === '' ? ' selected' : ''}>All farms (${yieldRows.length} plantings)</option>`]
+      .concat(farms.map(f => {
+        const count = yieldRows.filter(r => r.farm === f).length;
+        return `<option value="${f}"${yieldFarmFilter === f ? ' selected' : ''}>${f} (${count})</option>`;
+      })).join('');
+
     container.innerHTML = `
+      <select id="yieldFarmSelect" style="margin-bottom:10px;">${farmOptions}</select>
       <div style="background:white; border-radius:6px; padding:4px 10px 10px; overflow-x:auto;">
         <table style="width:100%; border-collapse:collapse; font-size:15px;">
           <thead><tr>${head}</tr></thead>
           <tbody>${body}</tbody>
         </table>
       </div>${footnote}`;
+
+    container.querySelector('#yieldFarmSelect').addEventListener('change', (e) => {
+      yieldFarmFilter = e.target.value;
+      renderYieldReport();
+    });
 
     // The table is wider than a scanner screen, and the column being sorted on
     // is one of the rightmost — scroll it into view so the crew can see what
@@ -1554,7 +1600,7 @@
           yieldSort.dir = yieldSort.dir === 'asc' ? 'desc' : 'asc';
         } else {
           // Names read best A–Z; every number reads best biggest-first.
-          yieldSort = { key, dir: key === 'plantingId' ? 'asc' : 'desc' };
+          yieldSort = { key, dir: (key === 'plantingId' || key === 'farm') ? 'asc' : 'desc' };
         }
         renderYieldReport();
       });
