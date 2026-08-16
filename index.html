@@ -150,7 +150,7 @@
 </header>
 
 <div style="display:flex; align-items:center; justify-content:center; gap:10px; margin-bottom:8px; flex-wrap:wrap;">
-  <span style="font-size:12px; color:#999;">Build: 2026-07-25 v12</span>
+  <span style="font-size:12px; color:#999;">Build: 2026-08-16 v16</span>
   <button id="checkUpdatesBtn" type="button" style="width:auto; margin:0; padding:6px 12px; font-size:12px; font-weight:600; background:#e2e0d6; color:var(--green-dark); border-radius:6px;">&#8635; Check for updates</button>
 </div>
 
@@ -190,6 +190,17 @@
   <input type="date" id="dateSearchInput">
   <button id="dateSearchBtn" style="background:#2c3e50; color:white;">Show Totals</button>
   <div id="dateTotals" style="margin-bottom:16px;"></div>
+
+  <h3>Yield per Planting</h3>
+  <div style="font-size:13px; color:#888; margin:-4px 0 10px; line-height:1.45;">
+    Confirmed wagons only. Bags and bins from a split wagon count toward the
+    planting they actually came from, not the wagon's primary planting.
+    <strong>Bag-Eq</strong> converts bins to bags at 1 bin = 12 bags (600 cobs
+    per bin ÷ 50 per bag) and adds them to the bags, so Bag-Eq/ac is the yield
+    with bins included. Bags/ac still counts bags alone. Tap a column heading to
+    re-sort; the table scrolls sideways on a narrow screen.
+  </div>
+  <div id="yieldReport" style="margin-bottom:16px;"></div>
 </div>
 
 <div id="tabRecords" style="display:none;">
@@ -848,7 +859,11 @@
         statusEl.textContent = 'Error counting wagons: ' + error.message;
         return (currentWagonNumber || 0) + 1;
       }
-      return (data ? data.length : 0) + 1;
+      // One physical wagon is one row in Wagons, however many plantings it was
+      // split across — count distinct wagon ids so a split wagon never advances
+      // today's wagon number by more than 1.
+      const wagonIds = new Set((data || []).map(w => w.id));
+      return wagonIds.size + 1;
     } catch (networkErr) {
       // Offline — estimate locally rather than crashing the reset flow.
       return (currentWagonNumber || 0) + 1;
@@ -886,7 +901,9 @@
     if (error) return { error };
 
     const wagons = data || [];
-    const wagonCount = wagons.length;
+    // Always distinct wagon ids — never a count of racks, extra segments, or
+    // planting entries. A wagon split across several plantings is one wagon.
+    const wagonCount = new Set(wagons.map(w => w.id)).size;
     const bagSum = wagons.reduce((sum, w) => sum + (w.total_bags || 0), 0);
     const binSum = wagons.reduce((sum, w) => sum + (w.bin_count || 0), 0);
 
@@ -908,16 +925,17 @@
       (segByWagon[s.wagon_id] = segByWagon[s.wagon_id] || []).push(s);
     });
 
+    // Each planting tracks the SET of wagon ids that carried it, never a
+    // running row count: a wagon with two extra segments on the same planting
+    // (or an extra segment naming the wagon's own primary planting) must still
+    // count as one wagon for that planting.
     const byPlanting = {};
-    function addToPlanting(key, wagonInc, bags, bins) {
-      if (!byPlanting[key]) byPlanting[key] = { wagons: 0, bags: 0, bins: 0 };
-      byPlanting[key].wagons += wagonInc;
+    function addToPlanting(key, wagonId, bags, bins) {
+      if (!byPlanting[key]) byPlanting[key] = { wagonIds: new Set(), bags: 0, bins: 0 };
+      byPlanting[key].wagonIds.add(wagonId);
       byPlanting[key].bags += bags;
       byPlanting[key].bins += bins;
     }
-    // Note: a mixed wagon is counted once under its primary planting AND
-    // once under each extra segment planting, so these per-row wagon counts
-    // can sum to more than wagonCount above — that's intentional, not a bug.
     wagons.forEach(w => {
       const key = w.planting_id || '(unknown)';
       const wSegs = segByWagon[w.id] || [];
@@ -925,13 +943,23 @@
       const segBinSum = wSegs.reduce((s, seg) => s + (seg.bin_count || 0), 0);
       const primaryBags = Math.max((w.total_bags || 0) - segBagSum, 0);
       const primaryBins = Math.max((w.bin_count || 0) - segBinSum, 0);
-      addToPlanting(key, 1, primaryBags, primaryBins);
+      addToPlanting(key, w.id, primaryBags, primaryBins);
       wSegs.forEach(seg => {
-        addToPlanting(seg.planting_id || '(unknown)', 1, seg.bag_count || 0, seg.bin_count || 0);
+        addToPlanting(seg.planting_id || '(unknown)', w.id, seg.bag_count || 0, seg.bin_count || 0);
       });
     });
 
-    return { wagonCount, bagSum, binSum, byPlanting };
+    // Collapse each planting's wagon-id set into a count. This is "how many
+    // distinct wagons carried this planting", so a wagon split between two
+    // plantings shows as 1 under each; the rows can therefore add up to more
+    // than wagonCount, which is the distinct wagon total for the whole day.
+    const byPlantingCounts = {};
+    Object.keys(byPlanting).forEach(key => {
+      const p = byPlanting[key];
+      byPlantingCounts[key] = { wagons: p.wagonIds.size, bags: p.bags, bins: p.bins };
+    });
+
+    return { wagonCount, bagSum, binSum, byPlanting: byPlantingCounts };
   }
 
   function renderBreakdown(byPlanting, emptyMessage) {
@@ -1252,7 +1280,7 @@
   async function refreshSeasonTotals() {
     const { data, error } = await db
       .from('Wagons')
-      .select('total_bags, bin_count')
+      .select('id, total_bags, bin_count')
       .eq('confirmed', true);
     if (error) {
       document.getElementById('seasonWagons').textContent = '?';
@@ -1260,7 +1288,9 @@
       document.getElementById('seasonBins').textContent = '?';
       return;
     }
-    const wagonCount = data ? data.length : 0;
+    // Distinct wagon ids, same rule as today's totals — a split wagon is one
+    // wagon for the season no matter how many plantings it touched.
+    const wagonCount = data ? new Set(data.map(w => w.id)).size : 0;
     const bagSum = data ? data.reduce((sum, w) => sum + (w.total_bags || 0), 0) : 0;
     const binSum = data ? data.reduce((sum, w) => sum + (w.bin_count || 0), 0) : 0;
     document.getElementById('seasonWagons').textContent = wagonCount;
@@ -1317,6 +1347,219 @@
   }
 
   dateSearchBtn.addEventListener('click', showDateTotals);
+
+  // ---- YIELD PER PLANTING ----
+  // Season-to-date bags (and bins) per planting, divided by that planting's
+  // Planted Acres. Confirmed wagons only, matching the Season Total rule.
+
+  // A bin holds 600 cobs; a bag holds 50. One bin is therefore worth 12 bags,
+  // which is what puts bins and bags on a single scale for the combined yield.
+  const BAGS_PER_BIN_EQUIVALENT = 600 / 50;
+
+  // PostgREST caps a single response at 1000 rows, so a plain select would
+  // silently start undercounting once the season passes that mark. Page
+  // through until a short page comes back.
+  async function fetchAllRows(table, columns, applyFilters) {
+    const PAGE = 1000;
+    let all = [];
+    for (let from = 0; ; from += PAGE) {
+      let query = db.from(table).select(columns);
+      if (applyFilters) query = applyFilters(query);
+      const { data, error } = await query.range(from, from + PAGE - 1);
+      if (error) return { error };
+      const rows = data || [];
+      all = all.concat(rows);
+      if (rows.length < PAGE) return { rows: all };
+    }
+  }
+
+  // Sort state for the yield table. Re-rendered in place on header tap.
+  // Defaults to the combined bag-equivalent yield, the figure that accounts
+  // for both bags and bins.
+  let yieldSort = { key: 'combinedPerAcre', dir: 'desc' };
+  let yieldRows = null;
+
+  async function refreshYieldReport() {
+    const container = document.getElementById('yieldReport');
+    container.innerHTML = '<div style="color:#888; text-align:center;">Loading yield...</div>';
+
+    if (allPlantings.length === 0) await loadPlantings();
+
+    const wagonResult = await fetchAllRows('Wagons', 'id, planting_id, total_bags, bin_count',
+      q => q.eq('confirmed', true));
+    if (wagonResult.error) {
+      container.innerHTML = `<div style="color:#c0392b;">Error loading wagons: ${wagonResult.error.message}</div>`;
+      return;
+    }
+    // The segments table is far smaller than Wagons, so pull it whole and
+    // filter locally — avoids building an .in() list of every wagon id.
+    const segResult = await fetchAllRows('wagon_extra_segments', 'wagon_id, planting_id, bag_count, bin_count');
+    if (segResult.error) {
+      container.innerHTML = `<div style="color:#c0392b;">Error loading extra plantings: ${segResult.error.message}</div>`;
+      return;
+    }
+
+    const wagons = wagonResult.rows;
+    const confirmedIds = new Set(wagons.map(w => w.id));
+    // A segment has no confirmed flag of its own — it inherits the wagon's.
+    const segByWagon = {};
+    segResult.rows.forEach(s => {
+      if (!confirmedIds.has(s.wagon_id)) return;
+      (segByWagon[s.wagon_id] = segByWagon[s.wagon_id] || []).push(s);
+    });
+
+    // Wagons.total_bags holds the WHOLE wagon (primary + every segment), so
+    // the segment bags must be subtracted before crediting the primary
+    // planting — otherwise a split wagon's bags get counted twice.
+    const byPlanting = {};
+    function credit(plantingId, wagonId, bags, bins) {
+      const key = plantingId || '(unknown)';
+      if (!byPlanting[key]) byPlanting[key] = { bags: 0, bins: 0, wagonIds: new Set() };
+      byPlanting[key].bags += bags;
+      byPlanting[key].bins += bins;
+      byPlanting[key].wagonIds.add(wagonId);
+    }
+    wagons.forEach(w => {
+      const segs = segByWagon[w.id] || [];
+      const segBags = segs.reduce((sum, s) => sum + (s.bag_count || 0), 0);
+      const segBins = segs.reduce((sum, s) => sum + (s.bin_count || 0), 0);
+      credit(w.planting_id, w.id,
+        Math.max((w.total_bags || 0) - segBags, 0),
+        Math.max((w.bin_count || 0) - segBins, 0));
+      segs.forEach(s => credit(s.planting_id, w.id, s.bag_count || 0, s.bin_count || 0));
+    });
+
+    const acresById = {};
+    allPlantings.forEach(p => { acresById[p['Planting ID']] = p['Planted Acres']; });
+
+    yieldRows = Object.keys(byPlanting).map(key => {
+      const p = byPlanting[key];
+      const rawAcres = acresById[key];
+      const acres = (typeof rawAcres === 'number' && rawAcres > 0) ? rawAcres : null;
+      // p.bins has already had the split-wagon segment subtraction applied in
+      // credit() above, exactly as p.bags has, so converting here can't
+      // double-count a mixed wagon's bins.
+      const bagEquiv = p.bags + p.bins * BAGS_PER_BIN_EQUIVALENT;
+      return {
+        plantingId: key,
+        bags: p.bags,
+        bins: p.bins,
+        bagEquiv,
+        wagons: p.wagonIds.size,
+        acres,
+        bagsPerAcre: acres ? p.bags / acres : null,
+        combinedPerAcre: acres ? bagEquiv / acres : null
+      };
+    });
+
+    renderYieldReport();
+  }
+
+  function renderYieldReport() {
+    const container = document.getElementById('yieldReport');
+    if (!yieldRows || yieldRows.length === 0) {
+      container.innerHTML = '<div style="color:#888; text-align:center;">No confirmed wagons yet.</div>';
+      return;
+    }
+
+    // Rows with no acres on file can't have a yield — they always sort last
+    // rather than being treated as zero, which would fake a worst-yield row.
+    const dir = yieldSort.dir === 'asc' ? 1 : -1;
+    const rows = yieldRows.slice().sort((a, b) => {
+      const av = a[yieldSort.key], bv = b[yieldSort.key];
+      if (av === null && bv === null) return a.plantingId.localeCompare(b.plantingId);
+      if (av === null) return 1;
+      if (bv === null) return -1;
+      if (typeof av === 'string') return av.localeCompare(bv) * dir;
+      return (av - bv) * dir;
+    });
+
+    const showBins = yieldRows.some(r => r.bins > 0);
+    const num = (v, places) => v === null ? '—'
+      : v.toLocaleString(undefined, { minimumFractionDigits: places, maximumFractionDigits: places });
+
+    const columns = [
+      // Planting IDs are long ("MB-F16,Superb MXR,05/28/26"). Splitting the row
+      // code onto its own line keeps this column narrow enough that the yield
+      // figures stay on screen at scanner width, without breaking mid-word.
+      { key: 'plantingId', label: 'Planting', align: 'left', wrap: true, fmt: r => {
+        const comma = r.plantingId.indexOf(',');
+        if (comma === -1) return `<div style="font-weight:600;">${r.plantingId}</div>`;
+        return `<div style="font-weight:600;">${r.plantingId.slice(0, comma)}</div>` +
+               `<div style="font-size:12px; color:#999; overflow-wrap:anywhere;">${r.plantingId.slice(comma + 1).trim()}</div>`;
+      } },
+      { key: 'bags', label: 'Bags', align: 'right', fmt: r => num(r.bags, 0) },
+      { key: 'acres', label: 'Acres', align: 'right', fmt: r => num(r.acres, 2) },
+      { key: 'bagsPerAcre', label: 'Bags/ac', align: 'right', fmt: r => num(r.bagsPerAcre, 1) }
+    ];
+    // With no bins anywhere in the report, Bag-Eq would just repeat Bags and
+    // Bag-Eq/ac would just repeat Bags/ac, so the bin-derived columns only
+    // appear once there are bins to convert.
+    if (showBins) {
+      columns.splice(2, 0, { key: 'bins', label: 'Bins', align: 'right', fmt: r => num(r.bins, 0) });
+      columns.splice(3, 0, { key: 'bagEquiv', label: 'Bag-Eq', align: 'right', fmt: r => num(r.bagEquiv, 0) });
+      columns.push({ key: 'combinedPerAcre', label: 'Bag-Eq/ac', align: 'right', fmt: r => num(r.combinedPerAcre, 1) });
+    }
+
+    // Bag-Eq/ac is the default sort but only exists when there are bins to
+    // convert. With no bins it equals Bags/ac exactly, so the row order is
+    // already right — this just gives the sort arrow a heading to sit on.
+    const activeKey = columns.some(c => c.key === yieldSort.key) ? yieldSort.key
+      : yieldSort.key === 'combinedPerAcre' ? 'bagsPerAcre'
+      : yieldSort.key === 'bagEquiv' ? 'bags'
+      : yieldSort.key;
+
+    const head = columns.map(c => {
+      const arrow = activeKey === c.key ? (yieldSort.dir === 'asc' ? ' ▲' : ' ▼') : '';
+      return `<th class="yieldSortHead" data-key="${c.key}" style="text-align:${c.align}; padding:8px 4px; border-bottom:2px solid #ddd; white-space:nowrap; cursor:pointer; color:var(--green-dark);">${c.label}${arrow}</th>`;
+    }).join('');
+
+    const body = rows.map(r => {
+      const cells = columns.map(c => {
+        const value = c.fmt ? c.fmt(r) : r[c.key];
+        const muted = value === '—' ? ' color:#bbb;' : '';
+        const wrap = c.wrap ? 'white-space:normal; overflow-wrap:break-word;' : 'white-space:nowrap;';
+        return `<td style="text-align:${c.align}; padding:8px 4px; border-bottom:1px solid #eee; ${wrap}${muted}">${value}</td>`;
+      }).join('');
+      return `<tr>${cells}</tr>`;
+    }).join('');
+
+    const missingAcres = yieldRows.filter(r => r.acres === null).length;
+    const footnote = missingAcres > 0
+      ? `<div style="font-size:13px; color:#888; margin-top:8px;">${missingAcres} planting${missingAcres === 1 ? '' : 's'} ha${missingAcres === 1 ? 's' : 've'} no Planted Acres on file — bags are shown, yield can't be calculated.</div>`
+      : '';
+
+    container.innerHTML = `
+      <div style="background:white; border-radius:6px; padding:4px 10px 10px; overflow-x:auto;">
+        <table style="width:100%; border-collapse:collapse; font-size:15px;">
+          <thead><tr>${head}</tr></thead>
+          <tbody>${body}</tbody>
+        </table>
+      </div>${footnote}`;
+
+    // The table is wider than a scanner screen, and the column being sorted on
+    // is one of the rightmost — scroll it into view so the crew can see what
+    // the order is based on without swiping to find it.
+    const scrollBox = container.querySelector('div');
+    const activeTh = container.querySelector(`.yieldSortHead[data-key="${activeKey}"]`);
+    if (scrollBox && activeTh) {
+      const overshoot = activeTh.offsetLeft + activeTh.offsetWidth - scrollBox.clientWidth;
+      if (overshoot > 0) scrollBox.scrollLeft = overshoot + 4;
+    }
+
+    container.querySelectorAll('.yieldSortHead').forEach(th => {
+      th.addEventListener('click', () => {
+        const key = th.dataset.key;
+        if (yieldSort.key === key) {
+          yieldSort.dir = yieldSort.dir === 'asc' ? 'desc' : 'asc';
+        } else {
+          // Names read best A–Z; every number reads best biggest-first.
+          yieldSort = { key, dir: key === 'plantingId' ? 'asc' : 'desc' };
+        }
+        renderYieldReport();
+      });
+    });
+  }
 
   // Every planting block (primary + each added segment) needs its own
   // positive count before the wagon can be finished. Returns an error
@@ -1696,6 +1939,7 @@
     if (name === 'totals') {
       refreshTodayTotals();
       refreshSeasonTotals();
+      refreshYieldReport();
     }
     if (name === 'records') {
       loadRecentWagons();
