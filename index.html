@@ -150,7 +150,7 @@
 </header>
 
 <div style="display:flex; align-items:center; justify-content:center; gap:10px; margin-bottom:8px; flex-wrap:wrap;">
-  <span style="font-size:12px; color:#999;">Build: 2026-08-16 v17</span>
+  <span style="font-size:12px; color:#999;">Build: 2026-08-17 v18</span>
   <button id="checkUpdatesBtn" type="button" style="width:auto; margin:0; padding:6px 12px; font-size:12px; font-weight:600; background:#e2e0d6; color:var(--green-dark); border-radius:6px;">&#8635; Check for updates</button>
 </div>
 
@@ -438,6 +438,11 @@
         return 'failed';
       }
       item.wagonId = result.data[0].id;
+      // A queued wagon carries the number it was given while offline, which
+      // other devices have very likely used by now. Settle it the same way a
+      // live save does.
+      const settled = await settleWagonNumber(item.wagonId, item.wagon_number);
+      if (settled !== item.wagon_number) item.wagon_number = settled;
     }
 
     if (item.type === 'rack' && !item.racksSaved) {
@@ -848,28 +853,82 @@
     if (!segmentPickerWrap.contains(e.target) && e.target !== addSegmentBtn) closeSegmentPicker();
   });
 
-  // Figure out today's wagon number for this planting
+  function startOfToday() {
+    const d = new Date();
+    d.setHours(0,0,0,0);
+    return d;
+  }
+
+  // Next free wagon number for today: one above the highest already used, not
+  // a count of rows. A count repeats a number the moment a wagon is deleted,
+  // and reads as one-too-low for every device that hasn't seen the newest row.
+  // One physical wagon is one row in Wagons however many plantings it carries,
+  // so a split wagon still advances this by exactly 1.
   async function calcWagonNumber() {
-    const startOfDay = new Date();
-    startOfDay.setHours(0,0,0,0);
     try {
       const { data, error } = await db
         .from('Wagons')
-        .select('id')
-        .gte('created_at', startOfDay.toISOString());
+        .select('wagon_number')
+        .gte('created_at', startOfToday().toISOString())
+        // nullsFirst:false matters here — Postgres sorts nulls first on a
+        // descending order, so a single wagon_number-less row would otherwise
+        // read as today's highest and reset the count to 1.
+        .order('wagon_number', { ascending: false, nullsFirst: false })
+        .limit(1);
       if (error) {
-        statusEl.textContent = 'Error counting wagons: ' + error.message;
+        statusEl.textContent = 'Error reading wagon numbers: ' + error.message;
         return (currentWagonNumber || 0) + 1;
       }
-      // One physical wagon is one row in Wagons, however many plantings it was
-      // split across — count distinct wagon ids so a split wagon never advances
-      // today's wagon number by more than 1.
-      const wagonIds = new Set((data || []).map(w => w.id));
-      return wagonIds.size + 1;
+      const highest = (data && data.length > 0) ? (data[0].wagon_number || 0) : 0;
+      return highest + 1;
     } catch (networkErr) {
       // Offline — estimate locally rather than crashing the reset flow.
       return (currentWagonNumber || 0) + 1;
     }
+  }
+
+  // Two scanners entering at once both read the same "next" number before
+  // either has saved, so they save the same one. The client can't make the
+  // insert atomic on its own, so each device settles it afterwards instead:
+  // whichever row was created first keeps the number, and any later row moves
+  // itself above today's high-water mark. Both devices apply the same rule to
+  // the same rows, so they agree on the outcome without talking to each other.
+  // Returns the number the wagon ended up with.
+  async function settleWagonNumber(wagonId, wagonNumber) {
+    for (let attempt = 0; attempt < 3; attempt++) {
+      let clashes;
+      try {
+        const { data, error } = await db
+          .from('Wagons')
+          .select('id, wagon_number, created_at')
+          .gte('created_at', startOfToday().toISOString())
+          .eq('wagon_number', wagonNumber);
+        if (error) return wagonNumber;
+        clashes = data || [];
+      } catch (networkErr) {
+        return wagonNumber;
+      }
+      if (clashes.length < 2) return wagonNumber;
+
+      // Earliest row keeps the number; id breaks a timestamp tie so every
+      // device picks the same winner.
+      const winner = clashes.slice().sort((a, b) =>
+        a.created_at.localeCompare(b.created_at) || a.id - b.id)[0];
+      if (winner.id === wagonId) return wagonNumber;
+
+      const next = await calcWagonNumber();
+      if (next === wagonNumber) return wagonNumber;
+      try {
+        const { error } = await db.from('Wagons').update({ wagon_number: next }).eq('id', wagonId);
+        if (error) return wagonNumber;
+      } catch (networkErr) {
+        return wagonNumber;
+      }
+      // Three devices can collide at once, in which case the two that moved
+      // may have landed on the same new number — loop and check again.
+      wagonNumber = next;
+    }
+    return wagonNumber;
   }
 
   async function resetRackEntryForNextWagon() {
@@ -1685,6 +1744,11 @@
       finishBtn.disabled = true;
       statusEl.textContent = 'Saving...';
 
+      // The number shown during entry was claimed when the planting was picked,
+      // possibly half an hour ago. Re-read it now so the gap between choosing a
+      // number and writing it is milliseconds rather than a whole wagon.
+      currentWagonNumber = await calcWagonNumber();
+
       const queueBase = {
         type: 'bin',
         planting_id: currentPlanting,
@@ -1737,6 +1801,7 @@
       }
 
       const binWagonId = binData[0].id;
+      currentWagonNumber = await settleWagonNumber(binWagonId, currentWagonNumber);
       const segResult = await saveSegments(binWagonId, 'bin_count', queueBase);
       if (segResult === 'queued') {
         statusEl.textContent = `Wagon #${currentWagonNumber} saved, but the connection dropped before the extra planting split saved — it's queued and will sync automatically.`;
@@ -1772,6 +1837,9 @@
 
     finishBtn.disabled = true;
     statusEl.textContent = 'Saving...';
+
+    // Same as the bin path: claim the number at write time, not at entry time.
+    currentWagonNumber = await calcWagonNumber();
 
     const queueBase = {
       type: 'rack',
@@ -1825,6 +1893,7 @@
     }
 
     const wagonId = wagonData[0].id;
+    currentWagonNumber = await settleWagonNumber(wagonId, currentWagonNumber);
 
     // Insert rack rows
     const rackRows = currentRacks.map(r => ({ wagon_id: wagonId, rack_number: r.rack_number, segment_planting_id: r.segment_planting_id }));
