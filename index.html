@@ -150,7 +150,7 @@
 </header>
 
 <div style="display:flex; align-items:center; justify-content:center; gap:10px; margin-bottom:8px; flex-wrap:wrap;">
-  <span style="font-size:12px; color:#999;">Build: 2026-08-17 v18</span>
+  <span style="font-size:12px; color:#999;">Build: 2026-08-17 v19</span>
   <button id="checkUpdatesBtn" type="button" style="width:auto; margin:0; padding:6px 12px; font-size:12px; font-weight:600; background:#e2e0d6; color:var(--green-dark); border-radius:6px;">&#8635; Check for updates</button>
 </div>
 
@@ -203,6 +203,14 @@
     sideways on a narrow screen.
   </div>
   <div id="yieldReport" style="margin-bottom:16px;"></div>
+
+  <h3>Yield per Farm</h3>
+  <div style="font-size:13px; color:#888; margin:-4px 0 10px; line-height:1.45;">
+    The same figures as above, rolled up by farm — every planting's bags, bins
+    and acres added together. Not affected by the farm dropdown, so you can see
+    where one farm sits against the rest. Tap a column heading to re-sort.
+  </div>
+  <div id="farmYieldReport" style="margin-bottom:16px;"></div>
 </div>
 
 <div id="tabRecords" style="display:none;">
@@ -1441,6 +1449,8 @@
   let yieldRows = null;
   // '' means every farm. Survives re-sorts and data refreshes.
   let yieldFarmFilter = '';
+  // The farm roll-up sorts independently of the planting table.
+  let farmYieldSort = { key: 'combinedPerAcre', dir: 'desc' };
 
   async function refreshYieldReport() {
     const container = document.getElementById('yieldReport');
@@ -1523,6 +1533,51 @@
     renderYieldReport();
   }
 
+  // Shared by both yield tables. A null value reads as an em dash rather than
+  // a zero, so "no acres on file" never looks like a measured result.
+  function yieldNum(v, places) {
+    return v === null || v === undefined ? '—'
+      : v.toLocaleString(undefined, { minimumFractionDigits: places, maximumFractionDigits: places });
+  }
+
+  // Builds the thead/tbody for a sortable yield table. headClass is the hook
+  // the caller binds its own sort handler to, so the two tables sort
+  // independently.
+  function buildYieldTable(columns, rows, sortState, activeKey, headClass) {
+    const head = columns.map(c => {
+      const arrow = activeKey === c.key ? (sortState.dir === 'asc' ? ' ▲' : ' ▼') : '';
+      // headWrap lets a long heading fold onto two lines instead of forcing the
+      // whole column as wide as its label. Worth it where the label is much
+      // wider than the numbers underneath it.
+      const ws = c.headWrap ? 'white-space:normal;' : 'white-space:nowrap;';
+      return `<th class="${headClass}" data-key="${c.key}" style="text-align:${c.align}; padding:8px 4px; border-bottom:2px solid #ddd; ${ws} cursor:pointer; color:var(--green-dark);">${c.label}${arrow}</th>`;
+    }).join('');
+
+    const body = rows.map(r => {
+      const cells = columns.map(c => {
+        const value = c.fmt ? c.fmt(r) : r[c.key];
+        const muted = value === '—' ? ' color:#bbb;' : '';
+        const wrap = c.wrap ? 'white-space:normal; overflow-wrap:break-word;' : 'white-space:nowrap;';
+        return `<td style="text-align:${c.align}; padding:8px 4px; border-bottom:1px solid #eee; ${wrap}${muted}">${value}</td>`;
+      }).join('');
+      return `<tr>${cells}</tr>`;
+    }).join('');
+
+    return `<table style="width:100%; border-collapse:collapse; font-size:15px;">
+          <thead><tr>${head}</tr></thead>
+          <tbody>${body}</tbody>
+        </table>`;
+  }
+
+  // Keeps the column being sorted on visible: both tables are wider than a
+  // scanner screen and the sorted column tends to be one of the rightmost.
+  function scrollSortedColumnIntoView(scrollBox, headClass, activeKey) {
+    const th = scrollBox && scrollBox.querySelector(`.${headClass}[data-key="${activeKey}"]`);
+    if (!th) return;
+    const overshoot = th.offsetLeft + th.offsetWidth - scrollBox.clientWidth;
+    if (overshoot > 0) scrollBox.scrollLeft = overshoot + 4;
+  }
+
   function renderYieldReport() {
     const container = document.getElementById('yieldReport');
     if (!yieldRows || yieldRows.length === 0) {
@@ -1558,8 +1613,7 @@
     });
 
     const showBins = visibleRows.some(r => r.bins > 0);
-    const num = (v, places) => v === null ? '—'
-      : v.toLocaleString(undefined, { minimumFractionDigits: places, maximumFractionDigits: places });
+    const num = yieldNum;
 
     const columns = [
       // Planting IDs are long ("MB-F16,Superb MXR,05/28/26"). Splitting the row
@@ -1602,20 +1656,7 @@
       : yieldSort.key === 'farm' ? 'plantingId'
       : yieldSort.key;
 
-    const head = columns.map(c => {
-      const arrow = activeKey === c.key ? (yieldSort.dir === 'asc' ? ' ▲' : ' ▼') : '';
-      return `<th class="yieldSortHead" data-key="${c.key}" style="text-align:${c.align}; padding:8px 4px; border-bottom:2px solid #ddd; white-space:nowrap; cursor:pointer; color:var(--green-dark);">${c.label}${arrow}</th>`;
-    }).join('');
-
-    const body = rows.map(r => {
-      const cells = columns.map(c => {
-        const value = c.fmt ? c.fmt(r) : r[c.key];
-        const muted = value === '—' ? ' color:#bbb;' : '';
-        const wrap = c.wrap ? 'white-space:normal; overflow-wrap:break-word;' : 'white-space:nowrap;';
-        return `<td style="text-align:${c.align}; padding:8px 4px; border-bottom:1px solid #eee; ${wrap}${muted}">${value}</td>`;
-      }).join('');
-      return `<tr>${cells}</tr>`;
-    }).join('');
+    const tableHtml = buildYieldTable(columns, rows, yieldSort, activeKey, 'yieldSortHead');
 
     const missingAcres = rows.filter(r => r.acres === null).length;
     const footnote = missingAcres > 0
@@ -1631,10 +1672,7 @@
     container.innerHTML = `
       <select id="yieldFarmSelect" style="margin-bottom:10px;">${farmOptions}</select>
       <div style="background:white; border-radius:6px; padding:4px 10px 10px; overflow-x:auto;">
-        <table style="width:100%; border-collapse:collapse; font-size:15px;">
-          <thead><tr>${head}</tr></thead>
-          <tbody>${body}</tbody>
-        </table>
+        ${tableHtml}
       </div>${footnote}`;
 
     container.querySelector('#yieldFarmSelect').addEventListener('change', (e) => {
@@ -1642,15 +1680,7 @@
       renderYieldReport();
     });
 
-    // The table is wider than a scanner screen, and the column being sorted on
-    // is one of the rightmost — scroll it into view so the crew can see what
-    // the order is based on without swiping to find it.
-    const scrollBox = container.querySelector('div');
-    const activeTh = container.querySelector(`.yieldSortHead[data-key="${activeKey}"]`);
-    if (scrollBox && activeTh) {
-      const overshoot = activeTh.offsetLeft + activeTh.offsetWidth - scrollBox.clientWidth;
-      if (overshoot > 0) scrollBox.scrollLeft = overshoot + 4;
-    }
+    scrollSortedColumnIntoView(container.querySelector('div'), 'yieldSortHead', activeKey);
 
     container.querySelectorAll('.yieldSortHead').forEach(th => {
       th.addEventListener('click', () => {
@@ -1662,6 +1692,101 @@
           yieldSort = { key, dir: (key === 'plantingId' || key === 'farm') ? 'asc' : 'desc' };
         }
         renderYieldReport();
+      });
+    });
+
+    renderFarmYieldReport();
+  }
+
+  // ---- YIELD PER FARM ----
+  // A pure roll-up of yieldRows, so the confirmed-wagon rule, the split-wagon
+  // segment subtraction and the bin conversion all come along already applied.
+  function renderFarmYieldReport() {
+    const container = document.getElementById('farmYieldReport');
+    if (!yieldRows || yieldRows.length === 0) {
+      container.innerHTML = '<div style="color:#888; text-align:center;">No confirmed wagons yet.</div>';
+      return;
+    }
+
+    const byFarm = {};
+    yieldRows.forEach(r => {
+      const f = byFarm[r.farm] || (byFarm[r.farm] = {
+        farm: r.farm, bags: 0, bins: 0, bagEquiv: 0, acres: 0, plantings: 0, missingAcres: 0
+      });
+      f.bags += r.bags;
+      f.bins += r.bins;
+      f.bagEquiv += r.bagEquiv;
+      f.plantings += 1;
+      // Acres are summed only where they're on file. The bags from a
+      // no-acres planting still count toward the farm's total, so the acres
+      // figure is the understated half — flagged per farm below.
+      if (r.acres === null) f.missingAcres += 1;
+      else f.acres += r.acres;
+    });
+
+    const farmRows = Object.keys(byFarm).map(key => {
+      const f = byFarm[key];
+      const acres = f.acres > 0 ? f.acres : null;
+      return { ...f, acres, combinedPerAcre: acres ? f.bagEquiv / acres : null };
+    });
+
+    const dir = farmYieldSort.dir === 'asc' ? 1 : -1;
+    const rows = farmRows.sort((a, b) => {
+      const av = a[farmYieldSort.key], bv = b[farmYieldSort.key];
+      if (av === null && bv === null) return a.farm.localeCompare(b.farm);
+      if (av === null) return 1;
+      if (bv === null) return -1;
+      if (typeof av === 'string') return av.localeCompare(bv) * dir;
+      return (av - bv) * dir;
+    });
+
+    const showBins = farmRows.some(r => r.bins > 0);
+    const columns = [
+      { key: 'farm', label: 'Farm', align: 'left', wrap: true, fmt: r => {
+        const flag = r.missingAcres > 0 ? ' <span style="color:#c0392b;">*</span>' : '';
+        return `<div style="font-weight:600;">${r.farm}${flag}</div>` +
+               `<div style="font-size:12px; color:#999;">${r.plantings} planting${r.plantings === 1 ? '' : 's'}</div>`;
+      } },
+      { key: 'bags', label: 'Bags', align: 'right', fmt: r => yieldNum(r.bags, 0) },
+      { key: 'acres', label: 'Acres', align: 'right', fmt: r => yieldNum(r.acres, 2) },
+      { key: 'combinedPerAcre', label: 'Bag-Eq/ac', align: 'right', headWrap: true, fmt: r => yieldNum(r.combinedPerAcre, 1) }
+    ];
+    if (showBins) {
+      columns.splice(2, 0, { key: 'bins', label: 'Bins', align: 'right', fmt: r => yieldNum(r.bins, 0) });
+      columns.splice(3, 0, { key: 'bagEquiv', label: 'Bag-Eq', align: 'right', fmt: r => yieldNum(r.bagEquiv, 0) });
+    }
+
+    // Bag-Eq only exists as a column when there are bins; without them it
+    // equals Bags, which is where the arrow belongs instead.
+    const activeKey = columns.some(c => c.key === farmYieldSort.key) ? farmYieldSort.key
+      : farmYieldSort.key === 'bagEquiv' ? 'bags'
+      : farmYieldSort.key;
+
+    const flagged = farmRows.filter(r => r.missingAcres > 0);
+    const footnote = flagged.length > 0
+      ? `<div style="font-size:13px; color:#888; margin-top:8px;"><span style="color:#c0392b;">*</span>
+         ${flagged.map(r => `${r.farm} (${r.missingAcres})`).join(', ')} —
+         plantings with no Planted Acres on file are left out of the acres total,
+         so these farms' acres read low. Their bags are still counted, which
+         pushes Bag-Eq/ac correspondingly high.</div>`
+      : '';
+
+    container.innerHTML = `
+      <div style="background:white; border-radius:6px; padding:4px 10px 10px; overflow-x:auto;">
+        ${buildYieldTable(columns, rows, farmYieldSort, activeKey, 'farmSortHead')}
+      </div>${footnote}`;
+
+    scrollSortedColumnIntoView(container.querySelector('div'), 'farmSortHead', activeKey);
+
+    container.querySelectorAll('.farmSortHead').forEach(th => {
+      th.addEventListener('click', () => {
+        const key = th.dataset.key;
+        if (farmYieldSort.key === key) {
+          farmYieldSort.dir = farmYieldSort.dir === 'asc' ? 'desc' : 'asc';
+        } else {
+          farmYieldSort = { key, dir: key === 'farm' ? 'asc' : 'desc' };
+        }
+        renderFarmYieldReport();
       });
     });
   }
