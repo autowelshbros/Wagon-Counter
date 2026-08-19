@@ -150,7 +150,7 @@
 </header>
 
 <div style="display:flex; align-items:center; justify-content:center; gap:10px; margin-bottom:8px; flex-wrap:wrap;">
-  <span style="font-size:12px; color:#999;">Build: 2026-08-17 v19</span>
+  <span style="font-size:12px; color:#999;">Build: 2026-08-19 v20</span>
   <button id="checkUpdatesBtn" type="button" style="width:auto; margin:0; padding:6px 12px; font-size:12px; font-weight:600; background:#e2e0d6; color:var(--green-dark); border-radius:6px;">&#8635; Check for updates</button>
 </div>
 
@@ -220,6 +220,14 @@
   <div id="searchResult" style="background:white; padding:12px; border-radius:6px; margin-bottom:16px; font-size:17px; color:#444; min-height:20px;"></div>
 
   <h3>Recent Wagons (tap to edit)</h3>
+  <div style="font-size:13px; color:#888; margin:-4px 0 10px; line-height:1.45;">
+    The 20 most recent wagons. To fix a wagon from an earlier day, pick that
+    date to list every wagon logged on it.
+  </div>
+  <div style="display:flex; gap:8px; margin-bottom:10px; flex-wrap:wrap;">
+    <input type="date" id="wagonDateInput" style="flex:1; min-width:150px; margin-bottom:0;">
+    <button id="wagonDateClearBtn" style="background:#e2e0d6; color:var(--green-dark); width:auto; margin:0; padding:10px 16px;">Latest</button>
+  </div>
   <div id="recentWagons"></div>
 </div>
 
@@ -1083,13 +1091,25 @@
     });
   }
 
-  // Load recent wagons for editing
+  // Load recent wagons for editing. With a date picked, the list is every
+  // wagon logged that day rather than the latest 20 -- a mislabelled planting
+  // usually surfaces a day late, by which point the wagon has been pushed off
+  // the end of a 20-row list by the next day's picking.
   async function loadRecentWagons() {
-    const { data, error } = await db
-      .from('Wagons')
-      .select('*')
-      .order('created_at', { ascending: false })
-      .limit(20);
+    const dateStr = document.getElementById('wagonDateInput').value;
+    let query = db.from('Wagons').select('*').order('created_at', { ascending: false });
+    if (dateStr) {
+      // Parse as local date, not UTC -- same rule as the date totals.
+      const [year, month, day] = dateStr.split('-').map(Number);
+      const startDate = new Date(year, month - 1, day, 0, 0, 0);
+      const endDate = new Date(year, month - 1, day + 1, 0, 0, 0);
+      query = query
+        .gte('created_at', startDate.toISOString())
+        .lt('created_at', endDate.toISOString());
+    } else {
+      query = query.limit(20);
+    }
+    const { data, error } = await query;
 
     const container = document.getElementById('recentWagons');
     if (error) {
@@ -1097,7 +1117,9 @@
       return;
     }
     if (!data || data.length === 0) {
-      container.innerHTML = '<div style="color:#888; text-align:center;">No wagons logged yet.</div>';
+      container.innerHTML = dateStr
+        ? '<div style="color:#888; text-align:center;">No wagons logged on that date.</div>'
+        : '<div style="color:#888; text-align:center;">No wagons logged yet.</div>';
       return;
     }
 
@@ -1117,6 +1139,12 @@
     });
   }
 
+  document.getElementById('wagonDateInput').addEventListener('change', loadRecentWagons);
+  document.getElementById('wagonDateClearBtn').addEventListener('click', () => {
+    document.getElementById('wagonDateInput').value = '';
+    loadRecentWagons();
+  });
+
   function toDatetimeLocalValue(isoString) {
     const d = new Date(isoString);
     const pad = n => String(n).padStart(2, '0');
@@ -1129,6 +1157,8 @@
 
     row.innerHTML = `
       <div style="margin-bottom:8px;"><strong>${isBin ? 'BIN — ' : ''}${wagon.planting_id} — Wagon #${wagon.wagon_number}</strong></div>
+      <label style="font-size:15px; color:#888;">Planting (applies when you tap Save)</label>
+      <select class="editPlantingSelect" style="margin-bottom:8px;"></select>
       <label style="font-size:15px; color:#888;">${isBin ? 'Number of bins' : 'Total bags'}</label>
       <input type="number" class="editCountInput" value="${isBin ? wagon.bin_count : wagon.total_bags}" style="margin-bottom:8px;">
       <label style="font-size:15px; color:#888;">Time logged</label>
@@ -1160,9 +1190,40 @@
     // planting selector) and the manual add-rack planting selector.
     let editorSegments = [];
 
+    // The wagon's primary planting as currently shown in the editor. Tracked
+    // separately from wagon.planting_id because the picker re-labels the
+    // "(primary)" options and re-filters the other planting dropdowns as soon
+    // as it changes, while the database row only moves on Save.
+    let primaryPlantingId = wagon.planting_id;
+
+    // Options for a planting dropdown: every planting except the ones already
+    // spoken for on this wagon, plus `keepId` so the dropdown can always show
+    // its own current value. A planting no longer in the master list is still
+    // offered when it is the current value, so opening the editor can never
+    // silently re-point a wagon.
+    function plantingOptions(takenIds, keepId) {
+      const taken = new Set(takenIds.filter(id => id && id !== keepId));
+      const opts = allPlantings
+        .filter(p => !taken.has(p['Planting ID']))
+        .map(p => ({ id: p['Planting ID'], label: plantingLabel(p) }));
+      if (keepId && !opts.some(o => o.id === keepId)) opts.unshift({ id: keepId, label: keepId });
+      return opts;
+    }
+
+    function optionTags(opts, selectedId) {
+      return opts.map(o =>
+        `<option value="${o.id}" ${o.id === selectedId ? 'selected' : ''}>${o.label}</option>`).join('');
+    }
+
+    function populatePrimarySelect() {
+      const sel = row.querySelector('.editPlantingSelect');
+      const opts = plantingOptions(editorSegments.map(s => s.planting_id), primaryPlantingId);
+      sel.innerHTML = optionTags(opts, primaryPlantingId);
+    }
+
     function populateAddSegmentSelect() {
       const sel = row.querySelector('.addSegmentSelect');
-      const usedIds = new Set([wagon.planting_id, ...editorSegments.map(s => s.planting_id)]);
+      const usedIds = new Set([primaryPlantingId, ...editorSegments.map(s => s.planting_id)]);
       const options = allPlantings.filter(p => !usedIds.has(p['Planting ID']));
       sel.innerHTML = options.length === 0
         ? '<option value="">No other plantings available</option>'
@@ -1174,7 +1235,7 @@
       const sel = row.querySelector('.addRackPlantingSelect');
       if (editorSegments.length > 0) {
         sel.style.display = '';
-        sel.innerHTML = `<option value="">${wagon.planting_id} (primary)</option>` +
+        sel.innerHTML = `<option value="">${primaryPlantingId} (primary)</option>` +
           editorSegments.map(s => `<option value="${s.planting_id}">${s.planting_id}</option>`).join('');
       } else {
         sel.style.display = 'none';
@@ -1197,12 +1258,46 @@
       if (editorSegments.length === 0) {
         area.innerHTML = '<div style="color:#888;">No extra plantings on this wagon.</div>';
       } else {
-        area.innerHTML = editorSegments.map(s => `
-          <div style="display:flex; justify-content:space-between; align-items:center; background:#f4f4f4; padding:6px 10px; border-radius:4px; margin-bottom:4px;">
-            <span>${s.planting_id} — ${isBin ? (s.bin_count || 0) + ' bins' : (s.bag_count || 0) + ' bags'}</span>
+        area.innerHTML = editorSegments.map(s => {
+          const taken = [primaryPlantingId, ...editorSegments.map(o => o.planting_id)];
+          return `
+          <div style="display:flex; justify-content:space-between; align-items:center; background:#f4f4f4; padding:6px 10px; border-radius:4px; margin-bottom:4px; gap:8px; flex-wrap:wrap;">
+            <select class="segmentPlantingSelect" data-id="${s.id}" data-current="${s.planting_id}" style="flex:1; min-width:140px; margin-bottom:0;">
+              ${optionTags(plantingOptions(taken, s.planting_id), s.planting_id)}
+            </select>
+            <span style="white-space:nowrap;">${isBin ? (s.bin_count || 0) + ' bins' : (s.bag_count || 0) + ' bags'}</span>
             <button class="removeSegmentEditBtn" data-id="${s.id}" style="background:#e74c3c; color:white; width:auto; padding:4px 10px; font-size:15px;">Remove</button>
           </div>
-        `).join('');
+        `;}).join('');
+
+        // Re-pointing a split's extra planting has to carry its racks with it:
+        // a rack remembers which planting it came off by planting id, so the
+        // rows naming the old id would otherwise fall back to the primary.
+        area.querySelectorAll('.segmentPlantingSelect').forEach(sel => {
+          sel.addEventListener('click', (e) => e.stopPropagation());
+          sel.addEventListener('change', async (e) => {
+            e.stopPropagation();
+            const oldId = sel.dataset.current;
+            const newId = sel.value;
+            if (!newId || newId === oldId) return;
+            const { error } = await db.from('wagon_extra_segments')
+              .update({ planting_id: newId }).eq('id', sel.dataset.id);
+            if (error) {
+              alert('Error changing planting: ' + error.message);
+              await refreshSegmentList();
+              return;
+            }
+            if (!isBin) {
+              await db.from('Racks').update({ segment_planting_id: newId })
+                .eq('wagon_id', wagon.id).eq('segment_planting_id', oldId);
+            }
+            await refreshSegmentList();
+            if (!isBin) await refreshRackList();
+            refreshTodayTotals();
+            refreshSeasonTotals();
+          });
+        });
+
         area.querySelectorAll('.removeSegmentEditBtn').forEach(btn => {
           btn.addEventListener('click', async (e) => {
             e.stopPropagation();
@@ -1214,6 +1309,7 @@
           });
         });
       }
+      populatePrimarySelect();
       populateAddSegmentSelect();
       updateAddRackPlantingSelect();
     }
@@ -1239,7 +1335,7 @@
           <span>${r.rack_number}</span>
           ${hasSegments ? `
             <select class="rackSegmentSelect" data-id="${r.id}" style="flex:1; margin-bottom:0;">
-              <option value="" ${!r.segment_planting_id ? 'selected' : ''}>${wagon.planting_id} (primary)</option>
+              <option value="" ${!r.segment_planting_id ? 'selected' : ''}>${primaryPlantingId} (primary)</option>
               ${editorSegments.map(s => `<option value="${s.planting_id}" ${r.segment_planting_id === s.planting_id ? 'selected' : ''}>${s.planting_id}</option>`).join('')}
             </select>
           ` : ''}
@@ -1263,6 +1359,19 @@
         });
       });
     }
+
+    // Re-pointing the primary re-labels every "(primary)" option and drops the
+    // newly chosen planting out of the split dropdowns, so the whole editor is
+    // rebuilt around it. Unlike a split's planting this is not written yet --
+    // it rides along with the Save button, next to the count and the time.
+    const primarySelect = row.querySelector('.editPlantingSelect');
+    primarySelect.addEventListener('click', (e) => e.stopPropagation());
+    primarySelect.addEventListener('change', async (e) => {
+      e.stopPropagation();
+      primaryPlantingId = primarySelect.value;
+      await refreshSegmentList();
+      if (!isBin) await refreshRackList();
+    });
 
     await refreshSegmentList();
 
@@ -1322,7 +1431,15 @@
       const updates = isBin
         ? { bin_count: newCount, created_at: newTimeISO }
         : { total_bags: newCount, created_at: newTimeISO };
-      await db.from('Wagons').update(updates).eq('id', wagon.id);
+      // Racks left on the primary carry no planting id of their own, so they
+      // follow the wagon across on their own -- only the split racks are
+      // pinned, and those keep pointing at the split they were scanned to.
+      updates.planting_id = primaryPlantingId;
+      const { error: saveErr } = await db.from('Wagons').update(updates).eq('id', wagon.id);
+      if (saveErr) {
+        alert('Error saving wagon: ' + saveErr.message);
+        return;
+      }
       loadRecentWagons();
       refreshTodayTotals();
       refreshSeasonTotals();
