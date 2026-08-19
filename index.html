@@ -150,7 +150,7 @@
 </header>
 
 <div style="display:flex; align-items:center; justify-content:center; gap:10px; margin-bottom:8px; flex-wrap:wrap;">
-  <span style="font-size:12px; color:#999;">Build: 2026-08-19 v20</span>
+  <span style="font-size:12px; color:#999;">Build: 2026-08-19 v21</span>
   <button id="checkUpdatesBtn" type="button" style="width:auto; margin:0; padding:6px 12px; font-size:12px; font-weight:600; background:#e2e0d6; color:var(--green-dark); border-radius:6px;">&#8635; Check for updates</button>
 </div>
 
@@ -221,12 +221,21 @@
 
   <h3>Recent Wagons (tap to edit)</h3>
   <div style="font-size:13px; color:#888; margin:-4px 0 10px; line-height:1.45;">
-    The 20 most recent wagons. To fix a wagon from an earlier day, pick that
-    date to list every wagon logged on it.
+    The 20 most recent wagons. Filter by date to list every wagon logged on one
+    day, or by planting to pull up every wagon tied to one planting — including
+    the wagons where it was only part of a split.
   </div>
-  <div style="display:flex; gap:8px; margin-bottom:10px; flex-wrap:wrap;">
+  <div style="display:flex; gap:8px; margin-bottom:10px;">
+    <button id="recordsModeDateBtn" type="button" class="tabBtn tabActive">By Date</button>
+    <button id="recordsModePlantingBtn" type="button" class="tabBtn">By Planting</button>
+  </div>
+  <div id="wagonDateRow" style="display:flex; gap:8px; margin-bottom:10px; flex-wrap:wrap;">
     <input type="date" id="wagonDateInput" style="flex:1; min-width:150px; margin-bottom:0;">
     <button id="wagonDateClearBtn" style="background:#e2e0d6; color:var(--green-dark); width:auto; margin:0; padding:10px 16px;">Latest</button>
+  </div>
+  <div id="wagonPlantingRow" style="display:none; gap:8px; margin-bottom:10px; flex-wrap:wrap;">
+    <select id="wagonPlantingSelect" style="flex:1; min-width:150px; margin-bottom:0;"></select>
+    <button id="wagonPlantingClearBtn" style="background:#e2e0d6; color:var(--green-dark); width:auto; margin:0; padding:10px 16px;">Clear</button>
   </div>
   <div id="recentWagons"></div>
 </div>
@@ -1091,47 +1100,135 @@
     });
   }
 
-  // Load recent wagons for editing. With a date picked, the list is every
-  // wagon logged that day rather than the latest 20 -- a mislabelled planting
-  // usually surfaces a day late, by which point the wagon has been pushed off
-  // the end of a 20-row list by the next day's picking.
-  async function loadRecentWagons() {
-    const dateStr = document.getElementById('wagonDateInput').value;
-    let query = db.from('Wagons').select('*').order('created_at', { ascending: false });
-    if (dateStr) {
-      // Parse as local date, not UTC -- same rule as the date totals.
-      const [year, month, day] = dateStr.split('-').map(Number);
-      const startDate = new Date(year, month - 1, day, 0, 0, 0);
-      const endDate = new Date(year, month - 1, day + 1, 0, 0, 0);
-      query = query
-        .gte('created_at', startDate.toISOString())
-        .lt('created_at', endDate.toISOString());
-    } else {
-      query = query.limit(20);
-    }
-    const { data, error } = await query;
+  // Records-tab filter mode: 'date' (the default -- the latest 20, or one
+  // day's wagons) or 'planting' (every wagon tied to one planting). Each mode
+  // keeps its own filter value, so toggling between them doesn't lose your place.
+  let recordsFilterMode = 'date';
 
-    const container = document.getElementById('recentWagons');
-    if (error) {
-      container.textContent = 'Error loading wagons: ' + error.message;
-      return;
+  function setRecordsFilterMode(mode) {
+    recordsFilterMode = mode;
+    const isPlanting = mode === 'planting';
+    document.getElementById('recordsModeDateBtn').classList.toggle('tabActive', !isPlanting);
+    document.getElementById('recordsModePlantingBtn').classList.toggle('tabActive', isPlanting);
+    document.getElementById('wagonDateRow').style.display = isPlanting ? 'none' : 'flex';
+    document.getElementById('wagonPlantingRow').style.display = isPlanting ? 'flex' : 'none';
+  }
+
+  // Same master list and label format as the entry picker and the wagon editor.
+  async function populateWagonPlantingSelect() {
+    if (allPlantings.length === 0) await loadPlantings();
+    const sel = document.getElementById('wagonPlantingSelect');
+    const keep = sel.value;
+    sel.innerHTML = '<option value="">Pick a planting...</option>' +
+      allPlantings.map(p => `<option value="${p['Planting ID']}">${plantingLabel(p)}</option>`).join('');
+    if (keep) sel.value = keep;
+  }
+
+  // Every wagon tied to a planting by either route: the wagon's own primary
+  // planting, or a split segment recorded against it. Two plain .eq() reads
+  // rather than one .or() -- a planting id is free text off the master list,
+  // and PostgREST's or=() grammar would need its commas, dots and parens
+  // escaped, which is a class of bug bought for nothing.
+  async function fetchWagonsForPlanting(plantingId) {
+    const primary = await db.from('Wagons').select('*').eq('planting_id', plantingId);
+    if (primary.error) return { error: primary.error };
+
+    const segs = await db.from('wagon_extra_segments')
+      .select('wagon_id, planting_id, bag_count, bin_count')
+      .eq('planting_id', plantingId);
+    if (segs.error) return { error: segs.error };
+
+    const byId = new Map((primary.data || []).map(w => [w.id, w]));
+    const segByWagon = new Map();
+    (segs.data || []).forEach(seg => segByWagon.set(seg.wagon_id, seg));
+
+    // Only the split wagons not already in hand, and in chunks -- an .in()
+    // list of a whole season's wagon ids would outgrow the request URL.
+    const missing = [...segByWagon.keys()].filter(id => !byId.has(id));
+    for (let from = 0; from < missing.length; from += 200) {
+      const { data, error } = await db.from('Wagons').select('*')
+        .in('id', missing.slice(from, from + 200));
+      if (error) return { error };
+      (data || []).forEach(w => byId.set(w.id, w));
     }
-    if (!data || data.length === 0) {
-      container.innerHTML = dateStr
-        ? '<div style="color:#888; text-align:center;">No wagons logged on that date.</div>'
-        : '<div style="color:#888; text-align:center;">No wagons logged yet.</div>';
+
+    const rows = [...byId.values()].sort((a, b) =>
+      String(b.created_at).localeCompare(String(a.created_at)));
+    return { rows, segByWagon };
+  }
+
+  // Load wagons for editing. By date this is the latest 20, or every wagon
+  // logged on one day -- a mislabelled planting usually surfaces a day late,
+  // by which point the wagon has been pushed off the end of a 20-row list by
+  // the next day's picking. By planting it is that planting's whole run.
+  async function loadRecentWagons() {
+    const container = document.getElementById('recentWagons');
+    const dateStr = document.getElementById('wagonDateInput').value;
+    const plantingId = document.getElementById('wagonPlantingSelect').value;
+    const byPlanting = recordsFilterMode === 'planting';
+
+    let rows;
+    let segByWagon = new Map();
+
+    if (byPlanting) {
+      if (!plantingId) {
+        container.innerHTML = '<div style="color:#888; text-align:center;">Pick a planting to see its wagons.</div>';
+        return;
+      }
+      const result = await fetchWagonsForPlanting(plantingId);
+      if (result.error) {
+        container.textContent = 'Error loading wagons: ' + result.error.message;
+        return;
+      }
+      rows = result.rows;
+      segByWagon = result.segByWagon;
+    } else {
+      let query = db.from('Wagons').select('*').order('created_at', { ascending: false });
+      if (dateStr) {
+        // Parse as local date, not UTC -- same rule as the date totals.
+        const [year, month, day] = dateStr.split('-').map(Number);
+        const startDate = new Date(year, month - 1, day, 0, 0, 0);
+        const endDate = new Date(year, month - 1, day + 1, 0, 0, 0);
+        query = query
+          .gte('created_at', startDate.toISOString())
+          .lt('created_at', endDate.toISOString());
+      } else {
+        query = query.limit(20);
+      }
+      const { data, error } = await query;
+      if (error) {
+        container.textContent = 'Error loading wagons: ' + error.message;
+        return;
+      }
+      rows = data || [];
+    }
+
+    if (rows.length === 0) {
+      container.innerHTML = byPlanting
+        ? '<div style="color:#888; text-align:center;">No wagons logged for that planting.</div>'
+        : dateStr
+          ? '<div style="color:#888; text-align:center;">No wagons logged on that date.</div>'
+          : '<div style="color:#888; text-align:center;">No wagons logged yet.</div>';
       return;
     }
 
     container.innerHTML = '';
-    data.forEach(w => {
+    rows.forEach(w => {
       const row = document.createElement('div');
       row.style.cssText = 'background:white; padding:10px 12px; border-radius:6px; margin-bottom:6px; cursor:pointer;';
       const when = new Date(w.created_at).toLocaleString();
       const isBin = w.wagon_type === 'bin';
+      // A wagon can be on a by-planting list because of a split rather than
+      // its own planting, in which case the line above names a different
+      // planting and reads as a mistake without this.
+      const seg = (byPlanting && w.planting_id !== plantingId) ? segByWagon.get(w.id) : null;
+      const splitNote = seg
+        ? `<div style="font-size:14px; color:#888;">split: ${isBin ? (seg.bin_count || 0) + ' bins' : (seg.bag_count || 0) + ' bags'} of ${seg.planting_id} on this wagon</div>`
+        : '';
       row.innerHTML = `<div style="display:flex; justify-content:space-between;">
         <span>${isBin ? 'BIN — ' : ''}${w.wagon_name ? `${w.wagon_name} — ` : ''}${w.planting_id} — Wagon #${w.wagon_number}</span><span>${isBin ? `${w.bin_count} bins` : `${w.total_bags} bags`}</span>
       </div>
+      ${splitNote}
       <div style="font-size:14px; color:#888;">${when}</div>`;
 
       row.onclick = () => openWagonEditor(w, row);
@@ -1139,6 +1236,20 @@
     });
   }
 
+  document.getElementById('recordsModeDateBtn').addEventListener('click', () => {
+    setRecordsFilterMode('date');
+    loadRecentWagons();
+  });
+  document.getElementById('recordsModePlantingBtn').addEventListener('click', async () => {
+    setRecordsFilterMode('planting');
+    await populateWagonPlantingSelect();
+    loadRecentWagons();
+  });
+  document.getElementById('wagonPlantingSelect').addEventListener('change', loadRecentWagons);
+  document.getElementById('wagonPlantingClearBtn').addEventListener('click', () => {
+    document.getElementById('wagonPlantingSelect').value = '';
+    loadRecentWagons();
+  });
   document.getElementById('wagonDateInput').addEventListener('change', loadRecentWagons);
   document.getElementById('wagonDateClearBtn').addEventListener('click', () => {
     document.getElementById('wagonDateInput').value = '';
