@@ -990,12 +990,10 @@
     // Always distinct wagon ids — never a count of racks, extra segments, or
     // planting entries. A wagon split across several plantings is one wagon.
     const wagonCount = new Set(wagons.map(w => w.id)).size;
-    const bagSum = wagons.reduce((sum, w) => sum + (w.total_bags || 0), 0);
-    const binSum = wagons.reduce((sum, w) => sum + (w.bin_count || 0), 0);
 
-    // By-planting breakdown needs to re-slice mixed wagons across their
-    // extra segments, so the primary planting isn't credited with bags/bins
-    // that actually came from a different field.
+    // A wagon is a list of (planting, count) pairs. One pair lives on the
+    // Wagons row and the rest in wagon_extra_segments -- that is schema
+    // layout, not a hierarchy. Every count is independent and simply adds.
     let segments = [];
     const wagonIds = wagons.map(w => w.id);
     if (wagonIds.length > 0) {
@@ -1010,6 +1008,10 @@
     segments.forEach(s => {
       (segByWagon[s.wagon_id] = segByWagon[s.wagon_id] || []).push(s);
     });
+    const bagSum = wagons.reduce((sum, w) => sum + (w.total_bags || 0), 0)
+      + segments.reduce((sum, s) => sum + (s.bag_count || 0), 0);
+    const binSum = wagons.reduce((sum, w) => sum + (w.bin_count || 0), 0)
+      + segments.reduce((sum, s) => sum + (s.bin_count || 0), 0);
 
     // Each planting tracks the SET of wagon ids that carried it, never a
     // running row count: a wagon with two extra segments on the same planting
@@ -1025,11 +1027,7 @@
     wagons.forEach(w => {
       const key = w.planting_id || '(unknown)';
       const wSegs = segByWagon[w.id] || [];
-      const segBagSum = wSegs.reduce((s, seg) => s + (seg.bag_count || 0), 0);
-      const segBinSum = wSegs.reduce((s, seg) => s + (seg.bin_count || 0), 0);
-      const primaryBags = Math.max((w.total_bags || 0) - segBagSum, 0);
-      const primaryBins = Math.max((w.bin_count || 0) - segBinSum, 0);
-      addToPlanting(key, w.id, primaryBags, primaryBins);
+      addToPlanting(key, w.id, w.total_bags || 0, w.bin_count || 0);
       wSegs.forEach(seg => {
         addToPlanting(seg.planting_id || '(unknown)', w.id, seg.bag_count || 0, seg.bin_count || 0);
       });
@@ -1531,11 +1529,6 @@
       e.stopPropagation();
       const newCount = parseInt(row.querySelector('.editCountInput').value);
       if (!newCount || newCount <= 0) return;
-      const segSum = editorSegments.reduce((s, seg) => s + (isBin ? (seg.bin_count || 0) : (seg.bag_count || 0)), 0);
-      if (newCount < segSum) {
-        alert(`Total must be at least ${segSum} (the sum of extra planting ${isBin ? 'bins' : 'bags'} already recorded on this wagon).`);
-        return;
-      }
       const newTimeLocal = row.querySelector('.editTimeInput').value; // e.g. "2026-07-21T14:30"
       if (!newTimeLocal) return;
       const newTimeISO = new Date(newTimeLocal).toISOString();
@@ -1579,7 +1572,8 @@
       .from('Wagons')
       .select('id, total_bags, bin_count')
       .eq('confirmed', true);
-    if (error) {
+    const segResult = error ? null : await fetchAllRows('wagon_extra_segments', 'wagon_id, bag_count, bin_count');
+    if (error || segResult.error) {
       document.getElementById('seasonWagons').textContent = '?';
       document.getElementById('seasonBags').textContent = '?';
       document.getElementById('seasonBins').textContent = '?';
@@ -1587,9 +1581,15 @@
     }
     // Distinct wagon ids, same rule as today's totals — a split wagon is one
     // wagon for the season no matter how many plantings it touched.
-    const wagonCount = data ? new Set(data.map(w => w.id)).size : 0;
-    const bagSum = data ? data.reduce((sum, w) => sum + (w.total_bags || 0), 0) : 0;
-    const binSum = data ? data.reduce((sum, w) => sum + (w.bin_count || 0), 0) : 0;
+    const wagons = data || [];
+    const confirmedIds = new Set(wagons.map(w => w.id));
+    // A segment has no confirmed flag of its own — it inherits the wagon's.
+    const segments = segResult.rows.filter(s => confirmedIds.has(s.wagon_id));
+    const wagonCount = confirmedIds.size;
+    const bagSum = wagons.reduce((sum, w) => sum + (w.total_bags || 0), 0)
+      + segments.reduce((sum, s) => sum + (s.bag_count || 0), 0);
+    const binSum = wagons.reduce((sum, w) => sum + (w.bin_count || 0), 0)
+      + segments.reduce((sum, s) => sum + (s.bin_count || 0), 0);
     document.getElementById('seasonWagons').textContent = wagonCount;
     document.getElementById('seasonBags').textContent = bagSum;
     document.getElementById('seasonBins').textContent = binSum;
@@ -1709,9 +1709,9 @@
       (segByWagon[s.wagon_id] = segByWagon[s.wagon_id] || []).push(s);
     });
 
-    // Wagons.total_bags holds the WHOLE wagon (primary + every segment), so
-    // the segment bags must be subtracted before crediting the primary
-    // planting — otherwise a split wagon's bags get counted twice.
+    // Wagons.total_bags is only the bags from the planting named on the
+    // Wagons row; each extra segment carries its own independent count.
+    // Nothing is subtracted -- every (planting, count) pair just adds.
     const byPlanting = {};
     function credit(plantingId, wagonId, bags, bins) {
       const key = plantingId || '(unknown)';
@@ -1722,11 +1722,7 @@
     }
     wagons.forEach(w => {
       const segs = segByWagon[w.id] || [];
-      const segBags = segs.reduce((sum, s) => sum + (s.bag_count || 0), 0);
-      const segBins = segs.reduce((sum, s) => sum + (s.bin_count || 0), 0);
-      credit(w.planting_id, w.id,
-        Math.max((w.total_bags || 0) - segBags, 0),
-        Math.max((w.bin_count || 0) - segBins, 0));
+      credit(w.planting_id, w.id, w.total_bags || 0, w.bin_count || 0);
       segs.forEach(s => credit(s.planting_id, w.id, s.bag_count || 0, s.bin_count || 0));
     });
 
@@ -2035,16 +2031,15 @@
     return null;
   }
 
-  function totalCount() {
-    return primaryCount + currentSegments.reduce((sum, s) => sum + s.count, 0);
-  }
-
-  function segmentSummaryText() {
-    if (currentSegments.length === 0) return '';
-    const parts = [`${currentPlanting} (primary) ${primaryCount}`].concat(
-      currentSegments.map(s => `${s.planting_id} ${s.count}`)
-    );
-    return ` — split: ${parts.join(', ')}`;
+  // Every count on a wagon is a (planting, count) pair of its own. The one
+  // for currentPlanting is written to the Wagons row and the rest to
+  // wagon_extra_segments, but that is where they live, not what they mean:
+  // none of them is a total of the others.
+  function countsText(unit) {
+    if (currentSegments.length === 0) return `${primaryCount} ${unit}`;
+    return [`${currentPlanting} ${primaryCount} ${unit}`].concat(
+      currentSegments.map(s => `${s.planting_id} ${s.count} ${unit}`)
+    ).join(', ');
   }
 
   // Saves currentSegments for an already-saved wagon (wagon + racks, if any,
@@ -2092,7 +2087,7 @@
     }
 
     if (currentMode === 'bin') {
-      const binCount = totalCount();
+      const binCount = primaryCount; // this row's own planting only
 
       finishBtn.disabled = true;
       statusEl.textContent = 'Saving...';
@@ -2141,7 +2136,7 @@
           error: null,
           createdAt: new Date().toISOString()
         });
-        statusEl.textContent = `No connection — Wagon #${currentWagonNumber} (${binCount} bins) is saved on this device and will sync automatically once you're back online.`;
+        statusEl.textContent = `No connection — Wagon #${currentWagonNumber} (${countsText('bins')}) is saved on this device and will sync automatically once you're back online.`;
         await resetBinEntryForNextWagon();
         finishBtn.disabled = false;
         return;
@@ -2168,7 +2163,7 @@
         return;
       }
 
-      statusEl.textContent = `Wagon #${currentWagonNumber} saved with ${binCount} bins${segmentSummaryText()}.`;
+      statusEl.textContent = `Wagon #${currentWagonNumber} saved: ${countsText('bins')}.`;
       refreshTodayTotals();
       refreshSeasonTotals();
       loadRecentWagons();
@@ -2182,9 +2177,10 @@
       statusEl.textContent = 'No racks scanned yet — nothing to save.';
       return;
     }
-    const bagTotal = totalCount();
-    if (bagTotal > 2000) {
-      statusEl.textContent = `That bag count (${bagTotal}) looks too high — a scan may have landed in this field by mistake. Please re-check and re-enter it.`;
+    const bagTotal = primaryCount; // this row's own planting only
+    const tooHigh = [primaryCount].concat(currentSegments.map(s => s.count)).find(c => c > 2000);
+    if (tooHigh !== undefined) {
+      statusEl.textContent = `That bag count (${tooHigh}) looks too high — a scan may have landed in this field by mistake. Please re-check and re-enter it.`;
       return;
     }
 
@@ -2233,7 +2229,7 @@
         error: null,
         createdAt: new Date().toISOString()
       });
-      statusEl.textContent = `No connection — Wagon #${currentWagonNumber} (${bagTotal} bags, ${currentRacks.length} racks) is saved on this device and will sync automatically once you're back online.`;
+      statusEl.textContent = `No connection — Wagon #${currentWagonNumber} (${countsText('bags')}, ${currentRacks.length} racks) is saved on this device and will sync automatically once you're back online.`;
       await resetRackEntryForNextWagon();
       finishBtn.disabled = false;
       return;
@@ -2297,7 +2293,7 @@
       return;
     }
 
-    statusEl.textContent = `Wagon #${currentWagonNumber} saved with ${bagTotal} bags (${currentRacks.length} racks)${segmentSummaryText()}.`;
+    statusEl.textContent = `Wagon #${currentWagonNumber} saved: ${countsText('bags')} (${currentRacks.length} racks).`;
     refreshTodayTotals();
     refreshSeasonTotals();
     loadRecentWagons();
