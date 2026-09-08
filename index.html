@@ -1166,7 +1166,6 @@
     const byPlanting = recordsFilterMode === 'planting';
 
     let rows;
-    let segByWagon = new Map();
 
     if (byPlanting) {
       if (!plantingId) {
@@ -1179,7 +1178,6 @@
         return;
       }
       rows = result.rows;
-      segByWagon = result.segByWagon;
     } else {
       let query = db.from('Wagons').select('*').order('created_at', { ascending: false });
       if (dateStr) {
@@ -1210,23 +1208,55 @@
       return;
     }
 
+    // Every extra planting on the listed wagons, so a split wagon can show
+    // each planting's own count and the physical wagon total. Chunked: a
+    // whole planting's wagon ids would outgrow the request URL in one .in().
+    const allSegsByWagon = new Map();
+    const ids = rows.map(w => w.id);
+    for (let from = 0; from < ids.length; from += 200) {
+      const { data: segData, error: segError } = await db.from('wagon_extra_segments')
+        .select('wagon_id, planting_id, bag_count, bin_count')
+        .in('wagon_id', ids.slice(from, from + 200));
+      if (segError) {
+        container.textContent = 'Error loading extra plantings: ' + segError.message;
+        return;
+      }
+      (segData || []).forEach(seg => {
+        if (!allSegsByWagon.has(seg.wagon_id)) allSegsByWagon.set(seg.wagon_id, []);
+        allSegsByWagon.get(seg.wagon_id).push(seg);
+      });
+    }
+
     container.innerHTML = '';
     rows.forEach(w => {
       const row = document.createElement('div');
       row.style.cssText = 'background:white; padding:10px 12px; border-radius:6px; margin-bottom:6px; cursor:pointer;';
       const when = new Date(w.created_at).toLocaleString();
       const isBin = w.wagon_type === 'bin';
-      // A wagon can be on a by-planting list because of a split rather than
-      // its own planting, in which case the line above names a different
-      // planting and reads as a mistake without this.
-      const seg = (byPlanting && w.planting_id !== plantingId) ? segByWagon.get(w.id) : null;
-      const splitNote = seg
-        ? `<div style="font-size:14px; color:#888;">split: ${isBin ? (seg.bin_count || 0) + ' bins' : (seg.bag_count || 0) + ' bags'} of ${seg.planting_id} on this wagon</div>`
-        : '';
+      const unit = isBin ? 'bins' : 'bags';
+      const segs = allSegsByWagon.get(w.id) || [];
+      const prefix = `${isBin ? 'BIN — ' : ''}${w.wagon_name ? `${w.wagon_name} — ` : ''}`;
+      const ownCount = isBin ? w.bin_count : w.total_bags;
+
+      let header, breakdown;
+      if (segs.length === 0) {
+        header = `<span>${prefix}${w.planting_id} — Wagon #${w.wagon_number}</span><span>${ownCount} ${unit}</span>`;
+        breakdown = '';
+      } else {
+        // Split wagon: each (planting, count) pair on its own line, the
+        // whole-wagon figure on the header. No pair is a total of the others.
+        const pairs = [{ planting_id: w.planting_id, count: ownCount || 0 }]
+          .concat(segs.map(seg => ({ planting_id: seg.planting_id, count: (isBin ? seg.bin_count : seg.bag_count) || 0 })));
+        const wagonTotal = pairs.reduce((sum, pr) => sum + pr.count, 0);
+        header = `<span>${prefix}Wagon #${w.wagon_number}</span><span>${wagonTotal} ${unit}</span>`;
+        breakdown = pairs.map(pr =>
+          `<div style="font-size:14px; padding-left:12px;">${pr.planting_id}: ${pr.count} ${unit}</div>`).join('');
+      }
+
       row.innerHTML = `<div style="display:flex; justify-content:space-between;">
-        <span>${isBin ? 'BIN — ' : ''}${w.wagon_name ? `${w.wagon_name} — ` : ''}${w.planting_id} — Wagon #${w.wagon_number}</span><span>${isBin ? `${w.bin_count} bins` : `${w.total_bags} bags`}</span>
+        ${header}
       </div>
-      ${splitNote}
+      ${breakdown}
       <div style="font-size:14px; color:#888;">${when}</div>`;
 
       row.onclick = () => openWagonEditor(w, row);
@@ -1923,8 +1953,8 @@
   }
 
   // ---- YIELD PER FARM ----
-  // A pure roll-up of yieldRows, so the confirmed-wagon rule, the split-wagon
-  // segment subtraction and the bin conversion all come along already applied.
+  // A pure roll-up of yieldRows, so the confirmed-wagon rule, the per-planting
+  // crediting of split wagons and the bin conversion all come along already applied.
   function renderFarmYieldReport() {
     const container = document.getElementById('farmYieldReport');
     if (!yieldRows || yieldRows.length === 0) {
