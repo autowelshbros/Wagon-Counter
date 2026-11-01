@@ -150,7 +150,7 @@
 </header>
 
 <div style="display:flex; align-items:center; justify-content:center; gap:10px; margin-bottom:8px; flex-wrap:wrap;">
-  <span style="font-size:12px; color:#999;">Build: 2026-11-01 v23</span>
+  <span style="font-size:12px; color:#999;">Build: 2026-11-01 v24</span>
   <button id="checkUpdatesBtn" type="button" style="width:auto; margin:0; padding:6px 12px; font-size:12px; font-weight:600; background:#e2e0d6; color:var(--green-dark); border-radius:6px;">&#8635; Check for updates</button>
 </div>
 
@@ -207,7 +207,8 @@
   </div>
   <select id="dailyPlantingSelect"><option value="">All plantings</option></select>
   <button id="dailyTotalsBtn" style="background:#2c3e50; color:white;">Show Daily Totals</button>
-  <div id="dailyTotals" style="margin-bottom:16px;"></div>
+  <div id="dailyTotals" style="margin-bottom:10px;"></div>
+  <button id="dailyExportBtn" style="display:none; background:var(--green); color:white;">Export to Excel</button>
 
   <h3>Yield per Planting</h3>
   <div style="font-size:13px; color:#888; margin:-4px 0 10px; line-height:1.45;">
@@ -1728,8 +1729,13 @@
     if (keep) sel.value = keep;
   }
 
+  // The last range shown, kept so Export writes exactly what is on screen.
+  let dailyExport = null;
+
   async function showDailyTotals() {
     const container = document.getElementById('dailyTotals');
+    dailyExport = null;
+    document.getElementById('dailyExportBtn').style.display = 'none';
     const fromStr = document.getElementById('dailyFromInput').value;
     const toStr = document.getElementById('dailyToInput').value;
     const plantingFilter = document.getElementById('dailyPlantingSelect').value;
@@ -1846,9 +1852,45 @@
         <tfoot>${totalRow}</tfoot>
       </table>
     </div>`;
+
+    // One flat row per (day, planting), oldest day first, so the sheet can be
+    // filtered, pivoted or charted in Excel without unpicking subtotal rows.
+    const farmById = {};
+    allPlantings.forEach(p => { farmById[p['Planting ID']] = p['Farm (Linked)']; });
+    const exportRows = [];
+    dayKeys.slice().reverse().forEach(dayKey => {
+      Object.keys(byDay[dayKey]).sort().forEach(key => {
+        const p = byDay[dayKey][key];
+        exportRows.push([dayKey, farmById[key] || '', key, p.wagonIds.size, p.bags, p.bins]);
+      });
+    });
+    dailyExport = { fromStr, toStr, plantingFilter, rows: exportRows };
+    document.getElementById('dailyExportBtn').style.display = '';
+  }
+
+  // CSV opens straight into Excel. The BOM makes Excel read it as UTF-8, and
+  // every text field is quoted because planting ids contain commas.
+  function exportDailyTotals() {
+    if (!dailyExport) return;
+    const quote = v => typeof v === 'number' ? v : `"${String(v).replace(/"/g, '""')}"`;
+    const lines = [['Date', 'Farm', 'Planting', 'Wagons', 'Bags', 'Bins']]
+      .concat(dailyExport.rows)
+      .map(r => r.map(quote).join(','));
+    const blob = new Blob(['﻿' + lines.join('\r\n')], { type: 'text/csv;charset=utf-8' });
+    const suffix = dailyExport.plantingFilter
+      ? '_' + dailyExport.plantingFilter.replace(/[^A-Za-z0-9-]+/g, '-')
+      : '';
+    const a = document.createElement('a');
+    a.href = URL.createObjectURL(blob);
+    a.download = `daily-totals_${dailyExport.fromStr}_to_${dailyExport.toStr}${suffix}.csv`;
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    setTimeout(() => URL.revokeObjectURL(a.href), 1000);
   }
 
   document.getElementById('dailyTotalsBtn').addEventListener('click', showDailyTotals);
+  document.getElementById('dailyExportBtn').addEventListener('click', exportDailyTotals);
 
   // ---- YIELD PER PLANTING ----
   // Season-to-date bags (and bins) per planting, divided by that planting's
