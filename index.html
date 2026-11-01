@@ -150,7 +150,7 @@
 </header>
 
 <div style="display:flex; align-items:center; justify-content:center; gap:10px; margin-bottom:8px; flex-wrap:wrap;">
-  <span style="font-size:12px; color:#999;">Build: 2026-09-07 v22</span>
+  <span style="font-size:12px; color:#999;">Build: 2026-11-01 v23</span>
   <button id="checkUpdatesBtn" type="button" style="width:auto; margin:0; padding:6px 12px; font-size:12px; font-weight:600; background:#e2e0d6; color:var(--green-dark); border-radius:6px;">&#8635; Check for updates</button>
 </div>
 
@@ -190,6 +190,24 @@
   <input type="date" id="dateSearchInput">
   <button id="dateSearchBtn" style="background:#2c3e50; color:white;">Show Totals</button>
   <div id="dateTotals" style="margin-bottom:16px;"></div>
+
+  <h3>Daily Totals by Planting</h3>
+  <div style="font-size:13px; color:#888; margin:-4px 0 10px; line-height:1.45;">
+    How much of each planting was picked on each day in the range, newest day
+    first. All wagons, confirmed or not, same as Totals by Date. A split
+    wagon counts once under each planting it carried.
+  </div>
+  <div style="display:flex; gap:8px;">
+    <label style="flex:1; min-width:0; font-size:13px; color:#888;">From
+      <input type="date" id="dailyFromInput">
+    </label>
+    <label style="flex:1; min-width:0; font-size:13px; color:#888;">To
+      <input type="date" id="dailyToInput">
+    </label>
+  </div>
+  <select id="dailyPlantingSelect"><option value="">All plantings</option></select>
+  <button id="dailyTotalsBtn" style="background:#2c3e50; color:white;">Show Daily Totals</button>
+  <div id="dailyTotals" style="margin-bottom:16px;"></div>
 
   <h3>Yield per Planting</h3>
   <div style="font-size:13px; color:#888; margin:-4px 0 10px; line-height:1.45;">
@@ -1675,6 +1693,163 @@
 
   dateSearchBtn.addEventListener('click', showDateTotals);
 
+  // ---- DAILY TOTALS BY PLANTING ----
+  // One row per (day, planting) across a date range, so a planting's daily
+  // pick can be read straight down the list. Same counting rules as
+  // getTotalsForRange: every (planting, count) pair on a wagon just adds, and
+  // a planting's wagon count is the distinct wagons that carried it.
+
+  function localDateKey(d) {
+    return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+  }
+
+  // Parse as local date, not UTC -- same rule as the date totals.
+  function parseLocalDate(dateStr) {
+    const [year, month, day] = dateStr.split('-').map(Number);
+    return new Date(year, month - 1, day, 0, 0, 0);
+  }
+
+  // Defaults to the last 7 days, today included. Only fills empty inputs so a
+  // range the user picked survives switching tabs.
+  async function initDailyTotals() {
+    const fromInput = document.getElementById('dailyFromInput');
+    const toInput = document.getElementById('dailyToInput');
+    if (!toInput.value) toInput.value = localDateKey(new Date());
+    if (!fromInput.value) {
+      const weekAgo = new Date();
+      weekAgo.setDate(weekAgo.getDate() - 6);
+      fromInput.value = localDateKey(weekAgo);
+    }
+    if (allPlantings.length === 0) await loadPlantings();
+    const sel = document.getElementById('dailyPlantingSelect');
+    const keep = sel.value;
+    sel.innerHTML = '<option value="">All plantings</option>' +
+      allPlantings.map(p => `<option value="${p['Planting ID']}">${plantingLabel(p)}</option>`).join('');
+    if (keep) sel.value = keep;
+  }
+
+  async function showDailyTotals() {
+    const container = document.getElementById('dailyTotals');
+    const fromStr = document.getElementById('dailyFromInput').value;
+    const toStr = document.getElementById('dailyToInput').value;
+    const plantingFilter = document.getElementById('dailyPlantingSelect').value;
+    if (!fromStr || !toStr) {
+      container.textContent = 'Pick a From and To date first.';
+      return;
+    }
+    const startDate = parseLocalDate(fromStr);
+    const endDate = parseLocalDate(toStr);
+    endDate.setDate(endDate.getDate() + 1);
+    if (endDate <= startDate) {
+      container.textContent = 'The To date must be on or after the From date.';
+      return;
+    }
+    container.textContent = 'Loading...';
+
+    const wagonResult = await fetchAllRows('Wagons', 'id, planting_id, total_bags, bin_count, created_at',
+      q => q.gte('created_at', startDate.toISOString()).lt('created_at', endDate.toISOString()));
+    if (wagonResult.error) {
+      container.textContent = 'Error loading wagons: ' + wagonResult.error.message;
+      return;
+    }
+    const wagons = wagonResult.rows;
+
+    // Chunked: a long range's wagon ids would outgrow the request URL in one .in().
+    const segByWagon = {};
+    const ids = wagons.map(w => w.id);
+    for (let from = 0; from < ids.length; from += 200) {
+      const { data: segData, error: segError } = await db.from('wagon_extra_segments')
+        .select('wagon_id, planting_id, bag_count, bin_count')
+        .in('wagon_id', ids.slice(from, from + 200));
+      if (segError) {
+        container.textContent = 'Error loading extra plantings: ' + segError.message;
+        return;
+      }
+      (segData || []).forEach(s => {
+        (segByWagon[s.wagon_id] = segByWagon[s.wagon_id] || []).push(s);
+      });
+    }
+
+    // byDay[dateKey][plantingId] = { wagonIds, bags, bins }
+    const byDay = {};
+    function credit(dayKey, plantingId, wagonId, bags, bins) {
+      const key = plantingId || '(unknown)';
+      if (plantingFilter && key !== plantingFilter) return;
+      const day = byDay[dayKey] = byDay[dayKey] || {};
+      if (!day[key]) day[key] = { wagonIds: new Set(), bags: 0, bins: 0 };
+      day[key].wagonIds.add(wagonId);
+      day[key].bags += bags;
+      day[key].bins += bins;
+    }
+    wagons.forEach(w => {
+      const dayKey = localDateKey(new Date(w.created_at));
+      credit(dayKey, w.planting_id, w.id, w.total_bags || 0, w.bin_count || 0);
+      (segByWagon[w.id] || []).forEach(s =>
+        credit(dayKey, s.planting_id, w.id, s.bag_count || 0, s.bin_count || 0));
+    });
+
+    const dayKeys = Object.keys(byDay).sort().reverse();
+    if (dayKeys.length === 0) {
+      container.innerHTML = `<div style="color:#888; text-align:center;">${plantingFilter
+        ? 'No wagons logged for that planting in that range.'
+        : 'No wagons logged in that range.'}</div>`;
+      return;
+    }
+
+    const cell = 'padding:8px 4px; border-bottom:1px solid #eee;';
+    const num = cell + ' text-align:right; white-space:nowrap;';
+    const foot = 'padding:8px 4px; border-top:2px solid #ddd;';
+    const grand = { wagonIds: new Set(), bags: 0, bins: 0 };
+    const body = dayKeys.map(dayKey => {
+      const day = byDay[dayKey];
+      const dayWagonIds = new Set();
+      let dayBags = 0, dayBins = 0;
+      const rows = Object.keys(day).sort().map(key => {
+        const p = day[key];
+        p.wagonIds.forEach(id => { dayWagonIds.add(id); grand.wagonIds.add(id); });
+        dayBags += p.bags;
+        dayBins += p.bins;
+        return `<tr>
+          <td style="${cell} padding-left:14px; overflow-wrap:anywhere;">${key}</td>
+          <td style="${num}">${p.wagonIds.size}</td>
+          <td style="${num}">${p.bags}</td>
+          <td style="${num}">${p.bins}</td>
+        </tr>`;
+      }).join('');
+      grand.bags += dayBags;
+      grand.bins += dayBins;
+      const label = parseLocalDate(dayKey).toLocaleDateString(undefined, { weekday: 'short', month: 'short', day: 'numeric' });
+      // The day row's wagon figure is distinct wagons that day, so it can be
+      // less than its planting rows added up when a wagon was split.
+      return `<tr style="background:#f7f6f1; font-weight:bold; color:var(--green-dark);">
+          <td style="${cell}">${label}</td>
+          <td style="${num}">${dayWagonIds.size}</td>
+          <td style="${num}">${dayBags}</td>
+          <td style="${num}">${dayBins}</td>
+        </tr>${rows}`;
+    }).join('');
+
+    const head = ['Date / Planting', 'Wagons', 'Bags', 'Bins'].map((h, i) =>
+      `<th style="text-align:${i === 0 ? 'left' : 'right'}; padding:8px 4px; border-bottom:2px solid #ddd; color:var(--green-dark);">${h}</th>`).join('');
+    const totalRow = dayKeys.length > 1
+      ? `<tr style="font-weight:bold; color:#2c3e50;">
+          <td style="${foot}">Range total</td>
+          <td style="${foot} text-align:right;">${grand.wagonIds.size}</td>
+          <td style="${foot} text-align:right;">${grand.bags}</td>
+          <td style="${foot} text-align:right;">${grand.bins}</td>
+        </tr>`
+      : '';
+    container.innerHTML = `<div style="background:white; border-radius:6px; padding:4px 8px; overflow-x:auto;">
+      <table style="width:100%; border-collapse:collapse; font-size:15px;">
+        <thead><tr>${head}</tr></thead>
+        <tbody>${body}</tbody>
+        <tfoot>${totalRow}</tfoot>
+      </table>
+    </div>`;
+  }
+
+  document.getElementById('dailyTotalsBtn').addEventListener('click', showDailyTotals);
+
   // ---- YIELD PER PLANTING ----
   // Season-to-date bags (and bins) per planting, divided by that planting's
   // Planted Acres. Confirmed wagons only, matching the Season Total rule.
@@ -2434,6 +2609,7 @@
       refreshTodayTotals();
       refreshSeasonTotals();
       refreshYieldReport();
+      initDailyTotals();
     }
     if (name === 'records') {
       loadRecentWagons();
