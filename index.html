@@ -88,6 +88,7 @@
   }
   button:active { opacity: 0.85; }
   #finishBtn { background: var(--green); color: white; }
+  .exportBtn { background: var(--green); color: white; }
   #status { text-align: center; color: #888; font-size: 16px; min-height: 20px; }
   ul { list-style: none; padding: 0; max-height: 200px; overflow-y: auto; }
   li {
@@ -150,7 +151,7 @@
 </header>
 
 <div style="display:flex; align-items:center; justify-content:center; gap:10px; margin-bottom:8px; flex-wrap:wrap;">
-  <span style="font-size:12px; color:#999;">Build: 2026-11-01 v24</span>
+  <span style="font-size:12px; color:#999;">Build: 2026-11-01 v25</span>
   <button id="checkUpdatesBtn" type="button" style="width:auto; margin:0; padding:6px 12px; font-size:12px; font-weight:600; background:#e2e0d6; color:var(--green-dark); border-radius:6px;">&#8635; Check for updates</button>
 </div>
 
@@ -184,12 +185,14 @@
   </div>
 
   <h3>By Planting (Today)</h3>
-  <div id="plantingBreakdown" style="margin-bottom:16px;"></div>
+  <div id="plantingBreakdown" style="margin-bottom:10px;"></div>
+  <button id="todayExportBtn" class="exportBtn" style="display:none;">Export to Excel</button>
 
   <h3>Totals by Date</h3>
   <input type="date" id="dateSearchInput">
   <button id="dateSearchBtn" style="background:#2c3e50; color:white;">Show Totals</button>
-  <div id="dateTotals" style="margin-bottom:16px;"></div>
+  <div id="dateTotals" style="margin-bottom:10px;"></div>
+  <button id="dateExportBtn" class="exportBtn" style="display:none;">Export to Excel</button>
 
   <h3>Daily Totals by Planting</h3>
   <div style="font-size:13px; color:#888; margin:-4px 0 10px; line-height:1.45;">
@@ -208,7 +211,7 @@
   <select id="dailyPlantingSelect"><option value="">All plantings</option></select>
   <button id="dailyTotalsBtn" style="background:#2c3e50; color:white;">Show Daily Totals</button>
   <div id="dailyTotals" style="margin-bottom:10px;"></div>
-  <button id="dailyExportBtn" style="display:none; background:var(--green); color:white;">Export to Excel</button>
+  <button id="dailyExportBtn" class="exportBtn" style="display:none;">Export to Excel</button>
 
   <h3>Yield per Planting</h3>
   <div style="font-size:13px; color:#888; margin:-4px 0 10px; line-height:1.45;">
@@ -221,7 +224,8 @@
     groups each farm's fields together, in planting order. The table scrolls
     sideways on a narrow screen.
   </div>
-  <div id="yieldReport" style="margin-bottom:16px;"></div>
+  <div id="yieldReport" style="margin-bottom:10px;"></div>
+  <button id="yieldExportBtn" class="exportBtn" style="display:none;">Export to Excel</button>
 
   <h3>Yield per Farm</h3>
   <div style="font-size:13px; color:#888; margin:-4px 0 10px; line-height:1.45;">
@@ -229,7 +233,8 @@
     and acres added together. Not affected by the farm dropdown, so you can see
     where one farm sits against the rest. Tap a column heading to re-sort.
   </div>
-  <div id="farmYieldReport" style="margin-bottom:16px;"></div>
+  <div id="farmYieldReport" style="margin-bottom:10px;"></div>
+  <button id="farmYieldExportBtn" class="exportBtn" style="display:none;">Export to Excel</button>
 </div>
 
 <div id="tabRecords" style="display:none;">
@@ -257,6 +262,7 @@
     <button id="wagonPlantingClearBtn" style="background:#e2e0d6; color:var(--green-dark); width:auto; margin:0; padding:10px 16px;">Clear</button>
   </div>
   <div id="recentWagons"></div>
+  <button id="recordsExportBtn" class="exportBtn" style="display:none;">Export to Excel</button>
 </div>
 
 <div id="tabEntry">
@@ -1183,6 +1189,7 @@
     const dateStr = document.getElementById('wagonDateInput').value;
     const plantingId = document.getElementById('wagonPlantingSelect').value;
     const byPlanting = recordsFilterMode === 'planting';
+    setExport('recordsExportBtn', null);
 
     let rows;
 
@@ -1280,6 +1287,25 @@
 
       row.onclick = () => openWagonEditor(w, row);
       container.appendChild(row);
+    });
+
+    // One sheet row per (wagon, planting) pair, so a split wagon's plantings
+    // each get their own row and the Bags/Bins columns add up cleanly.
+    const exportRows = [];
+    rows.forEach(w => {
+      const segs = allSegsByWagon.get(w.id) || [];
+      const common = [localDateTime(new Date(w.created_at)), w.wagon_number, w.wagon_name || '',
+        w.wagon_type === 'bin' ? 'Bin' : 'Rack'];
+      const tail = [segs.length > 0 ? 'Yes' : 'No', w.confirmed ? 'Yes' : 'No'];
+      exportRows.push(common.concat([w.planting_id || '(unknown)', w.total_bags || 0, w.bin_count || 0], tail));
+      segs.forEach(seg => exportRows.push(
+        common.concat([seg.planting_id || '(unknown)', seg.bag_count || 0, seg.bin_count || 0], tail)));
+    });
+    setExport('recordsExportBtn', {
+      name: byPlanting ? `wagons${fileSuffix(plantingId)}`
+        : dateStr ? `wagons_${dateStr}` : `wagons_latest-20_${localDateKey(new Date())}`,
+      header: ['Date/Time', 'Wagon #', 'Wagon Name', 'Type', 'Planting', 'Bags', 'Bins', 'Split Wagon', 'Confirmed'],
+      rows: exportRows
     });
   }
 
@@ -1657,6 +1683,7 @@
       document.getElementById('todayBags').textContent = '?';
       document.getElementById('todayBins').textContent = '?';
       document.getElementById('plantingBreakdown').textContent = 'Error loading breakdown: ' + result.error.message;
+      setExport('todayExportBtn', null);
       return;
     }
     document.getElementById('todayWagons').textContent = result.wagonCount;
@@ -1664,6 +1691,12 @@
     document.getElementById('todayBins').textContent = result.binSum;
     document.getElementById('plantingBreakdown').innerHTML =
       renderBreakdown(result.byPlanting, 'No wagons logged today yet.');
+    const todayKey = localDateKey(startOfDay);
+    setExport('todayExportBtn', {
+      name: `today-by-planting_${todayKey}`,
+      header: ['Date', 'Planting', 'Wagons', 'Bags', 'Bins'],
+      rows: breakdownExportRows(result.byPlanting, todayKey)
+    });
   }
 
   // Look up totals for a specific chosen date
@@ -1674,6 +1707,7 @@
       return;
     }
     dateTotalsEl.textContent = 'Loading...';
+    setExport('dateExportBtn', null);
 
     // Parse as local date, not UTC
     const [year, month, day] = dateStr.split('-').map(Number);
@@ -1690,9 +1724,70 @@
       ${result.wagonCount} wagons — ${result.bagSum} bags — ${result.binSum} bins
     </div>`;
     dateTotalsEl.innerHTML = header + renderBreakdown(result.byPlanting, 'No wagons logged that day.');
+    setExport('dateExportBtn', {
+      name: `totals_${dateStr}`,
+      header: ['Date', 'Planting', 'Wagons', 'Bags', 'Bins'],
+      rows: breakdownExportRows(result.byPlanting, dateStr)
+    });
   }
 
   dateSearchBtn.addEventListener('click', showDateTotals);
+
+  // ---- EXPORT TO EXCEL ----
+  // Each Export button downloads whatever its section last rendered, kept as
+  // data rather than scraped from the HTML so numbers land in Excel as
+  // numbers. A section clears its export (null) while loading or on error.
+  const exportData = {};
+
+  function setExport(btnId, data) {
+    exportData[btnId] = data;
+    document.getElementById(btnId).style.display = data && data.rows.length ? '' : 'none';
+  }
+
+  // Planting ids and farm names are free text; keep a file name to safe characters.
+  function fileSuffix(text) {
+    return text ? '_' + text.replace(/[^A-Za-z0-9-]+/g, '-') : '';
+  }
+
+  // Local time in a form Excel reads as a date-time.
+  function localDateTime(d) {
+    return `${localDateKey(d)} ${String(d.getHours()).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')}`;
+  }
+
+  // Rounds a computed figure for the sheet; a missing value is a blank cell,
+  // never a zero, matching the em dash on screen.
+  function exportNum(v, places) {
+    return v === null || v === undefined ? '' : Number(v.toFixed(places));
+  }
+
+  // CSV opens straight into Excel. The BOM makes Excel read it as UTF-8, and
+  // every text field is quoted because planting ids contain commas.
+  function downloadCsv({ name, header, rows }) {
+    const quote = v => typeof v === 'number' ? v : `"${String(v).replace(/"/g, '""')}"`;
+    const lines = [header].concat(rows).map(r => r.map(quote).join(','));
+    const blob = new Blob(['﻿' + lines.join('\r\n')], { type: 'text/csv;charset=utf-8' });
+    const a = document.createElement('a');
+    a.href = URL.createObjectURL(blob);
+    a.download = name + '.csv';
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    setTimeout(() => URL.revokeObjectURL(a.href), 1000);
+  }
+
+  document.querySelectorAll('.exportBtn').forEach(btn => {
+    btn.addEventListener('click', () => {
+      if (exportData[btn.id]) downloadCsv(exportData[btn.id]);
+    });
+  });
+
+  // byPlanting as returned by getTotalsForRange, one sheet row per planting.
+  function breakdownExportRows(byPlanting, dateKey) {
+    return Object.keys(byPlanting).sort().map(k => {
+      const p = byPlanting[k];
+      return [dateKey, k, p.wagons, p.bags, p.bins];
+    });
+  }
 
   // ---- DAILY TOTALS BY PLANTING ----
   // One row per (day, planting) across a date range, so a planting's daily
@@ -1729,13 +1824,9 @@
     if (keep) sel.value = keep;
   }
 
-  // The last range shown, kept so Export writes exactly what is on screen.
-  let dailyExport = null;
-
   async function showDailyTotals() {
     const container = document.getElementById('dailyTotals');
-    dailyExport = null;
-    document.getElementById('dailyExportBtn').style.display = 'none';
+    setExport('dailyExportBtn', null);
     const fromStr = document.getElementById('dailyFromInput').value;
     const toStr = document.getElementById('dailyToInput').value;
     const plantingFilter = document.getElementById('dailyPlantingSelect').value;
@@ -1864,33 +1955,14 @@
         exportRows.push([dayKey, farmById[key] || '', key, p.wagonIds.size, p.bags, p.bins]);
       });
     });
-    dailyExport = { fromStr, toStr, plantingFilter, rows: exportRows };
-    document.getElementById('dailyExportBtn').style.display = '';
-  }
-
-  // CSV opens straight into Excel. The BOM makes Excel read it as UTF-8, and
-  // every text field is quoted because planting ids contain commas.
-  function exportDailyTotals() {
-    if (!dailyExport) return;
-    const quote = v => typeof v === 'number' ? v : `"${String(v).replace(/"/g, '""')}"`;
-    const lines = [['Date', 'Farm', 'Planting', 'Wagons', 'Bags', 'Bins']]
-      .concat(dailyExport.rows)
-      .map(r => r.map(quote).join(','));
-    const blob = new Blob(['﻿' + lines.join('\r\n')], { type: 'text/csv;charset=utf-8' });
-    const suffix = dailyExport.plantingFilter
-      ? '_' + dailyExport.plantingFilter.replace(/[^A-Za-z0-9-]+/g, '-')
-      : '';
-    const a = document.createElement('a');
-    a.href = URL.createObjectURL(blob);
-    a.download = `daily-totals_${dailyExport.fromStr}_to_${dailyExport.toStr}${suffix}.csv`;
-    document.body.appendChild(a);
-    a.click();
-    a.remove();
-    setTimeout(() => URL.revokeObjectURL(a.href), 1000);
+    setExport('dailyExportBtn', {
+      name: `daily-totals_${fromStr}_to_${toStr}${fileSuffix(plantingFilter)}`,
+      header: ['Date', 'Farm', 'Planting', 'Wagons', 'Bags', 'Bins'],
+      rows: exportRows
+    });
   }
 
   document.getElementById('dailyTotalsBtn').addEventListener('click', showDailyTotals);
-  document.getElementById('dailyExportBtn').addEventListener('click', exportDailyTotals);
 
   // ---- YIELD PER PLANTING ----
   // Season-to-date bags (and bins) per planting, divided by that planting's
@@ -2053,10 +2125,12 @@
     const container = document.getElementById('yieldReport');
     if (!yieldRows || yieldRows.length === 0) {
       container.innerHTML = '<div style="color:#888; text-align:center;">No confirmed wagons yet.</div>';
+      setExport('yieldExportBtn', null);
+      renderFarmYieldReport();
       return;
     }
 
-    const farms = [...new Set(yieldRows.map(r => r.farm))].sort((a, b) => a.localeCompare(b));
+    const farms =[...new Set(yieldRows.map(r => r.farm))].sort((a, b) => a.localeCompare(b));
     // A filter for a farm that no longer has confirmed wagons would show an
     // empty table with no way back, so fall back to showing everything.
     if (yieldFarmFilter && !farms.includes(yieldFarmFilter)) yieldFarmFilter = '';
@@ -2153,6 +2227,15 @@
 
     scrollSortedColumnIntoView(container.querySelector('div'), 'yieldSortHead', activeKey);
 
+    // Every column goes in the sheet, bins and all, whatever the screen hid
+    // for width. Same rows and order as on screen, farm filter included.
+    setExport('yieldExportBtn', {
+      name: `yield-per-planting_${localDateKey(new Date())}${fileSuffix(yieldFarmFilter)}`,
+      header: ['Planting', 'Farm', 'Wagons', 'Bags', 'Bins', 'Bag-Eq', 'Acres', 'Bags/ac', 'Bag-Eq/ac'],
+      rows: rows.map(r => [r.plantingId, r.farm, r.wagons, r.bags, r.bins, r.bagEquiv,
+        exportNum(r.acres, 2), exportNum(r.bagsPerAcre, 1), exportNum(r.combinedPerAcre, 1)])
+    });
+
     container.querySelectorAll('.yieldSortHead').forEach(th => {
       th.addEventListener('click', () => {
         const key = th.dataset.key;
@@ -2176,6 +2259,7 @@
     const container = document.getElementById('farmYieldReport');
     if (!yieldRows || yieldRows.length === 0) {
       container.innerHTML = '<div style="color:#888; text-align:center;">No confirmed wagons yet.</div>';
+      setExport('farmYieldExportBtn', null);
       return;
     }
 
@@ -2248,6 +2332,13 @@
       </div>${footnote}`;
 
     scrollSortedColumnIntoView(container.querySelector('div'), 'farmSortHead', activeKey);
+
+    setExport('farmYieldExportBtn', {
+      name: `yield-per-farm_${localDateKey(new Date())}`,
+      header: ['Farm', 'Plantings', 'Plantings Missing Acres', 'Bags', 'Bins', 'Bag-Eq', 'Acres', 'Bag-Eq/ac'],
+      rows: rows.map(r => [r.farm, r.plantings, r.missingAcres, r.bags, r.bins, r.bagEquiv,
+        exportNum(r.acres, 2), exportNum(r.combinedPerAcre, 1)])
+    });
 
     container.querySelectorAll('.farmSortHead').forEach(th => {
       th.addEventListener('click', () => {
