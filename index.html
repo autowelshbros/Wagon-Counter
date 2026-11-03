@@ -142,6 +142,13 @@
     text-align: center;
     font-size: 15px;
   }
+  /* Sign-in (shared Welsh Bros login) */
+  .gate { position: fixed; inset: 0; background: var(--bg); z-index: 1000; overflow-y: auto; padding: 40px 14px; }
+  .gateCard { max-width: 420px; margin: 0 auto; background: white; border-radius: 8px; padding: 20px; border: 2px solid var(--green); }
+  .gateCard h2 { margin-top: 0; color: var(--green-dark); }
+  .gateCard input { width: 100%; font-size: 20px; padding: 12px; margin-bottom: 10px; }
+  .gateMsg { color: #b00020; font-weight: 600; min-height: 1.2em; }
+  .gateHint { color: #555; }
 </style>
 </head>
 <body>
@@ -158,6 +165,29 @@
 <div id="syncBanner" style="display:none; margin-bottom:12px;"></div>
 
 <h1>Wagon Counter</h1>
+
+<div id="whoBar" style="display:none; text-align:center; font-size:13px; margin:-6px 0 12px; color:#555;">
+  Signed in: <strong id="whoName"></strong>
+  <button id="signOutBtn" type="button" style="width:auto; margin:0 0 0 8px; padding:4px 10px; font-size:12px; background:#e2e0d6; color:var(--green-dark); border-radius:6px;">Sign out</button>
+</div>
+
+<div id="signInGate" class="gate" style="display:none;">
+  <div class="gateCard">
+    <h2>Wagon Counter</h2>
+    <div id="gateBadge">
+      <p class="gateHint">Scan your badge to sign in. Wagon Counter is for harvest leads (badge + PIN).</p>
+      <input id="gateBadgeInput" type="password" autocomplete="off" placeholder="Scan or type badge code">
+      <button id="gateBadgeBtn" type="button">Sign in</button>
+    </div>
+    <div id="gatePin" style="display:none;">
+      <p id="gatePinPrompt" class="gateHint"></p>
+      <input id="gatePinInput" type="password" inputmode="numeric" maxlength="4" autocomplete="off">
+      <button id="gatePinBtn" type="button">Continue</button>
+      <button id="gateCancelBtn" type="button" style="background:#e2e0d6; color:var(--green-dark);">Cancel</button>
+    </div>
+    <p id="gateMsg" class="gateMsg"></p>
+  </div>
+</div>
 
 <div style="display:flex; gap:8px; margin-bottom:16px;">
   <button id="tabEntryBtn" class="tabBtn tabActive">Entry</button>
@@ -2710,16 +2740,193 @@
     if (e.key === 'Enter') searchRack();
   });
 
-  loadPlantings();
-  refreshTodayTotals();
+  // ---- SIGN-IN (shared Welsh Bros login, Jesse 2026-11-03) ----
+  // Wagon Counter is for harvest leads: badge + PIN (level 2). People and
+  // permissions are managed on the food safety app's Accounts page. A tablet
+  // signed in by someone who is only a harvest lead (and/or Barn prep) stays
+  // signed in for the day, until 3 am, like the barn display; anyone else is
+  // signed out after 30 minutes idle. The tablet keeps one device sign-in
+  // between people; the badge says who is using it, and the database records
+  // that person on wagons and racks. With no signal, the last person signed
+  // in on this tablet keeps working (wagons wait in the queue).
+  const idb = () => db.schema('identity');
+  const SIGNED_IN_KEY = 'wcSignedIn';
+  const gateEl = document.getElementById('signInGate');
+  const gateBadgeEl = document.getElementById('gateBadge');
+  const gatePinEl = document.getElementById('gatePin');
+  const gateMsgEl = document.getElementById('gateMsg');
+  const badgeInput = document.getElementById('gateBadgeInput');
+  const pinInput = document.getElementById('gatePinInput');
+  let signedIn = false;
+  let appStarted = false;
+  let dayUntil = null;
+  let pinStep = null;
+  let lastTouch = Date.now();
+
+  const BADGE_MESSAGES = {
+    needs_enrolment: "This badge isn't set up yet. Scan it once on foodsafety.welshbros.ca to set it up.",
+    invalid_badge: "That doesn't look like a Welsh Bros badge. Try scanning it again.",
+    badge_revoked: 'This badge has been turned off. Ask an admin for a new one.',
+    inactive: 'This account is turned off. Ask an admin.',
+    disabled: 'Badge sign-in is turned off. Ask an admin.'
+  };
+  const NO_SIGNAL = 'Could not reach the server. Check the connection and try again.';
+  const LEADS_ONLY = 'Wagon Counter is for harvest leads (badge + PIN). Ask an admin if you need it.';
+
+  async function idCall(fn, args) {
+    try { return await idb().rpc(fn, args || {}); } catch (e) { return { data: null, error: e }; }
+  }
+
+  async function ensureDeviceSession() {
+    try {
+      const { data } = await db.auth.getSession();
+      if (data.session && data.session.user && data.session.user.is_anonymous) return null;
+      if (data.session) await db.auth.signOut({ scope: 'local' });
+      const { error } = await db.auth.signInAnonymously();
+      return error;
+    } catch (e) { return e; }
+  }
+
+  function readSignedIn() {
+    try { return JSON.parse(localStorage.getItem(SIGNED_IN_KEY) || 'null'); } catch (e) { return null; }
+  }
+
+  function showGate(message) {
+    signedIn = false;
+    dayUntil = null;
+    pinStep = null;
+    try { localStorage.removeItem(SIGNED_IN_KEY); } catch (e) { /* private mode */ }
+    gateEl.style.display = '';
+    gateBadgeEl.style.display = '';
+    gatePinEl.style.display = 'none';
+    gateMsgEl.textContent = message || '';
+    document.getElementById('whoBar').style.display = 'none';
+    badgeInput.value = '';
+    badgeInput.focus();
+  }
+
+  function enterApp(name) {
+    gateEl.style.display = 'none';
+    document.getElementById('whoName').textContent = name || '';
+    document.getElementById('whoBar').style.display = '';
+    signedIn = true;
+    lastTouch = Date.now();
+    startApp();
+  }
+
+  // Who is signed in on this tablet now? Lets them in if they are a harvest
+  // lead at level 2 (badge + PIN).
+  async function checkSignedIn() {
+    const { data, error } = await idCall('me');
+    if (error || !data) {
+      // No signal: the last person signed in here keeps working, until their day ends.
+      const last = readSignedIn();
+      if (last && (!last.until || Date.now() < last.until)) {
+        dayUntil = last.until || null;
+        return enterApp(last.name + ' (no signal)');
+      }
+      return showGate(NO_SIGNAL);
+    }
+    if (data.status !== 'approved') return showGate();
+    const perms = data.permissions || [];
+    if (!(perms.includes('harvest.lead') || perms.includes('harvest.admin'))) {
+      await idCall('end_session');
+      return showGate(LEADS_ONLY);
+    }
+    const stay = await idCall('stay_signed_in_today');
+    dayUntil = stay.data && stay.data.status === 'ok' ? new Date(stay.data.until).getTime() : null;
+    try { localStorage.setItem(SIGNED_IN_KEY, JSON.stringify({ name: data.full_name, until: dayUntil })); } catch (e) { /* private mode */ }
+    enterApp(data.full_name);
+  }
+
+  async function signInWithBadge() {
+    const code = badgeInput.value.trim();
+    badgeInput.value = '';
+    if (!code) return;
+    gateMsgEl.textContent = 'Signing in...';
+    if (await ensureDeviceSession()) return showGate(NO_SIGNAL);
+    const r = await idCall('badge_sign_in', { p_code: code });
+    if (r.error || !r.data) return showGate(NO_SIGNAL);
+    if (r.data.status !== 'signed_in') return showGate(BADGE_MESSAGES[r.data.status] || 'Could not sign in. Try again.');
+    const d = (await idCall('sign_in_details', { p_code: null })).data;
+    if (!d) return showGate(NO_SIGNAL);
+    if (d.status === 'awaiting_approval') {
+      await idCall('end_session');
+      return showGate((d.full_name || 'This person') + ' is waiting for an admin to approve their first sign-in.');
+    }
+    if (d.level === 2) return checkSignedIn();
+    if (d.pin === 'enter' || d.pin === 'set') {
+      pinStep = d.pin;
+      gateBadgeEl.style.display = 'none';
+      gatePinEl.style.display = '';
+      document.getElementById('gatePinPrompt').textContent = d.pin === 'set'
+        ? 'Choose a 4-digit PIN. You will use it with your badge from now on.'
+        : 'Enter your 4-digit PIN.';
+      gateMsgEl.textContent = '';
+      pinInput.value = '';
+      pinInput.focus();
+      return;
+    }
+    await idCall('end_session');
+    showGate(LEADS_ONLY);
+  }
+
+  async function submitPin() {
+    const pin = pinInput.value.trim();
+    pinInput.value = '';
+    if (!/^[0-9]{4}$/.test(pin)) { gateMsgEl.textContent = 'Enter 4 digits.'; return; }
+    gateMsgEl.textContent = 'Checking...';
+    const r = await idCall(pinStep === 'set' ? 'set_pin' : 'verify_pin', { p_pin: pin });
+    const status = r.data && r.data.status;
+    if (status === 'ok') return checkSignedIn();
+    gateMsgEl.textContent = status === 'wrong' ? 'Wrong PIN. Try again.'
+      : status === 'weak' ? 'That PIN is too easy to guess. Choose 4 digits that are not in a row or all the same.'
+      : 'Could not check the PIN. Try again.';
+  }
+
+  async function signOut(message) {
+    await idCall('end_session');
+    showGate(message);
+  }
+
+  document.getElementById('gateBadgeBtn').addEventListener('click', signInWithBadge);
+  badgeInput.addEventListener('keydown', (e) => { if (e.key === 'Enter') { e.preventDefault(); signInWithBadge(); } });
+  document.getElementById('gatePinBtn').addEventListener('click', submitPin);
+  pinInput.addEventListener('keydown', (e) => { if (e.key === 'Enter') { e.preventDefault(); submitPin(); } });
+  document.getElementById('gateCancelBtn').addEventListener('click', () => signOut());
+  document.getElementById('signOutBtn').addEventListener('click', () => signOut());
+
+  // While someone works, tell the database the sign-in is still in use (it
+  // signs out after 30 minutes idle, except the all-day tablet).
+  ['click', 'keydown', 'touchstart'].forEach((ev) => document.addEventListener(ev, () => {
+    if (!signedIn || dayUntil || !navigator.onLine || Date.now() - lastTouch < 2 * 60 * 1000) return;
+    lastTouch = Date.now();
+    idCall('touch_session').then(({ data, error }) => {
+      if (!error && data === false) showGate('You were signed out because Wagon Counter was not used for 30 minutes.');
+    });
+  }));
+  setInterval(() => {
+    if (signedIn && dayUntil && Date.now() >= dayUntil) {
+      signOut('The wagon tablet signs out overnight. Scan your badge to start today.');
+    }
+  }, 60 * 1000);
+
+  // Everything that used to run when the page opened now runs after signing in.
+  function startApp() {
+    loadPlantings();
+    refreshTodayTotals();
     refreshSeasonTotals();
     loadRecentWagons();
+    // Restore any wagons queued from a previous offline session and try to sync them.
+    renderQueueIndicator();
+    attemptSyncQueue();
+    if (appStarted) return;
+    appStarted = true;
+    window.addEventListener('online', () => { if (signedIn) attemptSyncQueue(); });
+    setInterval(() => { if (signedIn) attemptSyncQueue(); }, 20000);
+  }
 
-  // Restore any wagons queued from a previous offline session and try to sync them.
-  renderQueueIndicator();
-  attemptSyncQueue();
-  window.addEventListener('online', () => attemptSyncQueue());
-  setInterval(() => attemptSyncQueue(), 20000);
+  ensureDeviceSession().then(() => checkSignedIn());
 
   // Tab switching
   const tabs = {
