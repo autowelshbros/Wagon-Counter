@@ -2746,9 +2746,9 @@
   // signed in by someone who is only a harvest lead (and/or Barn prep) stays
   // signed in for the day, until 3 am, like the barn display; anyone else is
   // signed out after 30 minutes idle. The tablet keeps one device sign-in
-  // between people; the badge says who is using it, and the database records
-  // that person on wagons and racks. With no signal, the last person signed
-  // in on this tablet keeps working (wagons wait in the queue).
+  // between people; the badge says who is using it. With no signal, the last
+  // person signed in on this tablet keeps working (wagons wait in the queue),
+  // and the sign-in is checked again when the signal is back.
   const idb = () => db.schema('identity');
   const SIGNED_IN_KEY = 'wcSignedIn';
   const gateEl = document.getElementById('signInGate');
@@ -2922,7 +2922,9 @@
     attemptSyncQueue();
     if (appStarted) return;
     appStarted = true;
-    window.addEventListener('online', () => { if (signedIn) attemptSyncQueue(); });
+    // Signal back: check the sign-in first (the database may have signed an
+    // offline lead out after 30 minutes), then send the queued wagons.
+    window.addEventListener('online', () => { if (signedIn) checkSignedIn().then(() => { if (signedIn) attemptSyncQueue(); }); });
     setInterval(() => { if (signedIn) attemptSyncQueue(); }, 20000);
   }
 
